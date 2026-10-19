@@ -85,19 +85,29 @@ export class LibraryStore {
   }
 
   static removeBook(bookId: string): void {
+    LibraryStore.removeBooks([bookId]);
+  }
+
+  static removeBooks(bookIds: string[]): void {
+    if (bookIds.length === 0) {
+      return;
+    }
     const books = LibraryStore.getBooks();
     const remain: BookMeta[] = [];
     for (let i = 0; i < books.length; i++) {
-      if (books[i].id !== bookId) {
+      if (bookIds.indexOf(books[i].id) < 0) {
         remain.push(books[i]);
       }
     }
     LibraryStore.saveBooks(remain);
-    const bookmarkFile = LibraryStore.bookmarksPath(bookId);
-    if (FileUtil.exists(bookmarkFile)) {
-      FileUtil.deleteRecursive(bookmarkFile);
+    for (let i = 0; i < bookIds.length; i++) {
+      const bookId = bookIds[i];
+      const bookmarkFile = LibraryStore.bookmarksPath(bookId);
+      if (FileUtil.exists(bookmarkFile)) {
+        FileUtil.deleteRecursive(bookmarkFile);
+      }
+      FileUtil.deleteRecursive(AppPaths.bookDir(bookId));
     }
-    FileUtil.deleteRecursive(AppPaths.bookDir(bookId));
   }
 
   static getManifest(bookId: string): BookManifest {
