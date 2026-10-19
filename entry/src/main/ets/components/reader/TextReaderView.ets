@@ -1,9 +1,69 @@
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { ReadingMode } from '../../model/BookModels';
 import { PaginationResult, TextPaginator } from '../../service/TextPaginator';
 
+const DOMAIN = 0x0006;
+const TAG = 'TextReaderView';
+
 const PAGE_LEFT_RIGHT = 24;
-const PAGE_TOP = 64;
-const PAGE_BOTTOM = 80;
+const HEADER_HEIGHT = 38;
+const FOOTER_HEIGHT = 42;
+const CONTENT_PAD_COMPACT = 12;
+const CONTENT_PAD_TOP_EXPANDED = 32;
+const CONTENT_PAD_BOTTOM_EXPANDED = 26;
+const VERTICAL_PAD_TOP = 44;
+const VERTICAL_PAD_BOTTOM = 52;
+const FOOTER_TEXT_SIZE = 11;
+
+@Component
+struct ReaderFooter {
+  @Prop progressText: string = '';
+  @Prop subTextColor: string = '#8C8C8C';
+  @State clock: string = '';
+
+  private timer: number = -1;
+
+  aboutToAppear(): void {
+    this.clock = ReaderFooter.formatNow();
+    this.timer = setInterval(() => {
+      this.clock = ReaderFooter.formatNow();
+    }, 30000);
+  }
+
+  aboutToDisappear(): void {
+    if (this.timer !== -1) {
+      clearInterval(this.timer);
+      this.timer = -1;
+    }
+  }
+
+  private static formatNow(): string {
+    const now = new Date();
+    const hours = now.getHours();
+    const minutes = now.getMinutes();
+    const hh = hours < 10 ? `0${hours}` : `${hours}`;
+    const mm = minutes < 10 ? `0${minutes}` : `${minutes}`;
+    return `${hh}:${mm}`;
+  }
+
+  build() {
+    Row() {
+      Text(this.clock)
+        .fontSize(FOOTER_TEXT_SIZE)
+        .fontColor(this.subTextColor)
+      Blank()
+      Text(this.progressText)
+        .fontSize(FOOTER_TEXT_SIZE)
+        .fontColor(this.subTextColor)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+    }
+    .width('100%')
+    .height(FOOTER_HEIGHT)
+    .padding({ left: PAGE_LEFT_RIGHT, right: PAGE_LEFT_RIGHT, bottom: 12 })
+    .alignItems(VerticalAlign.Center)
+  }
+}
 
 @Component
 export struct TextReaderView {
@@ -12,10 +72,14 @@ export struct TextReaderView {
   @Prop @Watch('onConfigChanged') mode: ReadingMode = ReadingMode.VERTICAL;
   @Prop @Watch('onConfigChanged') fontSize: number = 18;
   @Prop @Watch('onConfigChanged') lineHeightRatio: number = 1.7;
+  @Prop @Watch('onControlsChanged') controlsVisible: boolean = false;
   @Prop startCharOffset: number = 0;
   @Prop @Watch('onReload') loadVersion: number = 0;
+  @Prop chapterIndex: number = 0;
+  @Prop chapterCount: number = 0;
   @Prop bgColor: string = '#F7F3E8';
   @Prop textColor: string = '#2B2B2B';
+  @Prop subTextColor: string = '#8C8C8C';
   @Prop accentColor: string = '#8B5E3C';
   @Prop accentTextColor: string = '#FFF8ED';
 
@@ -61,8 +125,36 @@ export struct TextReaderView {
     return Math.max(1, this.lastWidth - PAGE_LEFT_RIGHT * 2);
   }
 
+  private contentTopPad(): number {
+    return this.controlsVisible ? CONTENT_PAD_TOP_EXPANDED : CONTENT_PAD_COMPACT;
+  }
+
+  private contentBottomPad(): number {
+    return this.controlsVisible ? CONTENT_PAD_BOTTOM_EXPANDED : CONTENT_PAD_COMPACT;
+  }
+
   private pageContentHeight(): number {
-    return Math.max(1, this.lastHeight - PAGE_TOP - PAGE_BOTTOM - 20);
+    const safety = this.lineHeightValue() * 0.5;
+    return Math.max(1, this.lastHeight - HEADER_HEIGHT - FOOTER_HEIGHT
+      - this.contentTopPad() - this.contentBottomPad() - safety);
+  }
+
+  private viewportHeight(): number {
+    return Math.max(1, this.lastHeight - HEADER_HEIGHT - FOOTER_HEIGHT);
+  }
+
+  private footerProgress(): string {
+    if (this.chapterCount <= 0) {
+      return this.chapterIndex >= 0 ? `第 ${this.chapterIndex + 1} 章` : '';
+    }
+    const current = this.chapterIndex + 1;
+    return `第 ${current}/${this.chapterCount} 章`;
+  }
+
+  private onControlsChanged(): void {
+    if (this.mode !== ReadingMode.VERTICAL) {
+      this.reload(this.currentCharOffset);
+    }
   }
 
   private onReload(): void {
@@ -117,6 +209,8 @@ export struct TextReaderView {
     this.needsRestore = false;
     this.restorePage();
     this.reportCurrent();
+    hilog.debug(DOMAIN, TAG, 'paginate pages=%{public}d height=%{public}s textArea=%{public}s',
+      newPages.length, this.lastHeight.toFixed(1), this.pageContentHeight().toFixed(1));
   }
 
   private findPage(offset: number): number {
@@ -157,7 +251,7 @@ export struct TextReaderView {
     if (this.mode !== ReadingMode.VERTICAL) {
       return;
     }
-    const maxScroll = Math.max(1, this.contentHeightVp - this.lastHeight);
+    const maxScroll = Math.max(1, this.contentHeightVp - this.viewportHeight());
     let ratio = yOffset / maxScroll;
     if (ratio < 0) {
       ratio = 0;
@@ -187,7 +281,7 @@ export struct TextReaderView {
       clearTimeout(this.restoreTimer);
     }
     this.restoreTimer = setTimeout(() => {
-      const maxScroll = Math.max(0, this.contentHeightVp - this.lastHeight);
+      const maxScroll = Math.max(0, this.contentHeightVp - this.viewportHeight());
       this.verticalScroller.scrollTo({ xOffset: 0, yOffset: ratio * maxScroll });
       this.restoreTimer = -1;
     }, 100);
@@ -197,96 +291,133 @@ export struct TextReaderView {
     this.onProgress(this.currentCharOffset, this.currentRatio, this.currentPage);
   }
 
-  build() {
-    Stack() {
-      if (this.mode === ReadingMode.VERTICAL) {
-        Scroll(this.verticalScroller) {
-          Column() {
-            Text(this.chapterTitle)
-              .width('100%')
-              .fontSize(this.fontSize + 6)
-              .fontWeight(FontWeight.Bold)
-              .fontColor(this.textColor)
-              .margin({ bottom: 18 })
+  @Builder
+  header() {
+    Row() {
+      Text(this.chapterTitle)
+        .width('100%')
+        .fontSize(12)
+        .fontColor(this.subTextColor)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .textAlign(TextAlign.Start)
+    }
+    .width('100%')
+    .height(HEADER_HEIGHT)
+    .padding({ left: PAGE_LEFT_RIGHT, right: PAGE_LEFT_RIGHT, top: 10 })
+    .alignItems(VerticalAlign.Center)
+  }
 
-            Text(this.content)
-              .width('100%')
-              .fontSize(this.fontSize)
-              .lineHeight(this.lineHeightValue())
-              .fontColor(this.textColor)
-
-            Button('下一章')
-              .type(ButtonType.Capsule)
-              .backgroundColor(this.accentColor)
-              .fontColor(this.accentTextColor)
-              .fontSize(14)
-              .margin({ top: 32, bottom: 24 })
-              .onClick(() => {
-                this.onNextChapter();
-              })
-          }
+  @Builder
+  verticalBody() {
+    Scroll(this.verticalScroller) {
+      Column() {
+        Text(this.content)
           .width('100%')
-          .padding({
-            left: PAGE_LEFT_RIGHT,
-            right: PAGE_LEFT_RIGHT,
-            top: PAGE_TOP,
-            bottom: PAGE_BOTTOM
+          .fontSize(this.fontSize)
+          .lineHeight(this.lineHeightValue())
+          .fontColor(this.textColor)
+
+        Button('下一章')
+          .type(ButtonType.Capsule)
+          .backgroundColor(this.accentColor)
+          .fontColor(this.accentTextColor)
+          .fontSize(14)
+          .margin({ top: 32, bottom: 24 })
+          .onClick(() => {
+            this.onNextChapter();
           })
-          .onAreaChange((oldValue: Area, newValue: Area) => {
-            const height = Number(newValue.height);
-            if (height > 0 && Math.abs(height - this.contentHeightVp) > 0.5) {
-              this.contentHeightVp = height;
-              this.tryRestoreVertical();
-            }
-          })
-        }
-        .width('100%')
-        .height('100%')
-        .scrollBar(BarState.Off)
-        .onDidScroll((xOffset: number, yOffset: number, scrollState: ScrollState) => {
-          this.handleVerticalScroll(yOffset);
-        })
-        .onScrollStop(() => {
-          this.reportCurrent();
-        })
-      } else {
-        Swiper(this.swiperController) {
-          ForEach(this.pages, (pageText: string, index: number) => {
-            Column() {
-              Text(pageText)
-                .width('100%')
-                .fontSize(this.fontSize)
-                .lineHeight(this.lineHeightValue())
-                .fontColor(this.textColor)
-            }
-            .width('100%')
-            .height('100%')
-            .alignItems(HorizontalAlign.Start)
-            .padding({
-              left: PAGE_LEFT_RIGHT,
-              right: PAGE_LEFT_RIGHT,
-              top: PAGE_TOP,
-              bottom: PAGE_BOTTOM
-            })
-          }, (pageText: string, index: number) => `${index}_${pageText}`)
-        }
-        .width('100%')
-        .height('100%')
-        .index(this.currentPage)
-        .loop(false)
-        .indicator(false)
-        .onChange((index: number) => {
-          this.handlePageChange(index);
-        })
       }
+      .width('100%')
+      .padding({
+        left: PAGE_LEFT_RIGHT,
+        right: PAGE_LEFT_RIGHT,
+        top: VERTICAL_PAD_TOP,
+        bottom: VERTICAL_PAD_BOTTOM
+      })
+      .onAreaChange((oldValue: Area, newValue: Area) => {
+        const height = Number.parseFloat(String(newValue.height));
+        if (Number.isFinite(height) && height > 0 && Math.abs(height - this.contentHeightVp) > 0.5) {
+          this.contentHeightVp = height;
+          this.tryRestoreVertical();
+        }
+      })
+    }
+    .width('100%')
+    .height('100%')
+    .scrollBar(BarState.Off)
+    .onDidScroll((xOffset: number, yOffset: number, scrollState: ScrollState) => {
+      this.handleVerticalScroll(yOffset);
+    })
+    .onScrollStop(() => {
+      this.reportCurrent();
+    })
+  }
+
+  @Builder
+  horizontalBody() {
+    Swiper(this.swiperController) {
+      ForEach(this.pages, (pageText: string, index: number) => {
+        Column() {
+          Text(pageText)
+            .width('100%')
+            .fontSize(this.fontSize)
+            .lineHeight(this.lineHeightValue())
+            .fontColor(this.textColor)
+        }
+        .width('100%')
+        .height('100%')
+        .justifyContent(FlexAlign.Start)
+        .alignItems(HorizontalAlign.Start)
+        .padding({
+          left: PAGE_LEFT_RIGHT,
+          right: PAGE_LEFT_RIGHT,
+          top: this.contentTopPad(),
+          bottom: this.contentBottomPad()
+        })
+      }, (pageText: string, index: number) => `${index}_${pageText}`)
+    }
+    .width('100%')
+    .height('100%')
+    .index(this.currentPage)
+    .loop(false)
+    .indicator(false)
+    .onChange((index: number) => {
+      this.handlePageChange(index);
+    })
+  }
+
+  build() {
+    Column() {
+      this.header()
+
+      Stack() {
+        if (this.mode === ReadingMode.VERTICAL) {
+          this.verticalBody()
+        } else {
+          this.horizontalBody()
+        }
+      }
+      .width('100%')
+      .layoutWeight(1)
+
+      ReaderFooter({
+        progressText: this.footerProgress(),
+        subTextColor: this.subTextColor
+      })
     }
     .width('100%')
     .height('100%')
     .backgroundColor(this.bgColor)
     .onAreaChange((oldValue: Area, newValue: Area) => {
-      const width = Number(newValue.width);
-      const height = Number(newValue.height);
-      if (width > 0 && height > 0 && (width !== this.lastWidth || height !== this.lastHeight)) {
+      const width = Number.parseFloat(String(newValue.width));
+      const height = Number.parseFloat(String(newValue.height));
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+        hilog.warn(DOMAIN, TAG, 'invalid area: %{public}s x %{public}s',
+          String(newValue.width), String(newValue.height));
+        return;
+      }
+      if (width !== this.lastWidth || height !== this.lastHeight) {
         this.lastWidth = width;
         this.lastHeight = height;
         this.reload(this.currentCharOffset);

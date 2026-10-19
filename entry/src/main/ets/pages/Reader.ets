@@ -1,4 +1,5 @@
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
+import { window } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import {
   BookManifest,
@@ -61,6 +62,7 @@ struct Reader {
   private sessionRunning: boolean = false;
   private sessionStartAt: number = 0;
   private sessionTimer: number = -1;
+  private readerWindow: window.Window | undefined = undefined;
 
   aboutToAppear(): void {
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
@@ -112,16 +114,47 @@ struct Reader {
 
   onPageShow(): void {
     this.startReadingSession();
+    this.enterImmersive();
   }
 
   onPageHide(): void {
     this.stopReadingSession();
     this.flushProgress();
+    this.exitImmersive();
   }
 
   aboutToDisappear(): void {
     this.stopReadingSession();
     this.flushProgress();
+    this.exitImmersive();
+  }
+
+  private async enterImmersive(): Promise<void> {
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const win = await window.getLastWindow(context);
+      this.readerWindow = win;
+      await win.setWindowLayoutFullScreen(true);
+      await win.setWindowSystemBarEnable([]);
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`enter immersive failed: ${err.message}`);
+    }
+  }
+
+  private async exitImmersive(): Promise<void> {
+    const win = this.readerWindow;
+    if (win === undefined) {
+      return;
+    }
+    this.readerWindow = undefined;
+    try {
+      await win.setWindowSystemBarEnable(['status', 'navigation']);
+      await win.setWindowLayoutFullScreen(false);
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`exit immersive failed: ${err.message}`);
+    }
   }
 
   onBackPress(): boolean {
@@ -560,10 +593,14 @@ struct Reader {
           mode: this.readingMode,
           fontSize: this.fontSize,
           lineHeightRatio: this.lineHeightRatio,
+          controlsVisible: this.controlsVisible,
+          chapterIndex: this.chapterIndex,
+          chapterCount: this.manifest.chapters.length,
           startCharOffset: this.startCharOffset,
           loadVersion: this.loadVersion,
           bgColor: this.palette.bg,
           textColor: this.palette.text,
+          subTextColor: this.palette.subText,
           accentColor: this.palette.accent,
           accentTextColor: this.palette.accentText,
           onProgress: (charOffset: number, ratio: number, pageIndex: number): void => {
@@ -744,5 +781,6 @@ struct Reader {
     .width('100%')
     .height('100%')
     .backgroundColor(this.pageBackground())
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 }
