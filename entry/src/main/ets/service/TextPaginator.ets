@@ -17,6 +17,8 @@ export class PaginationResult {
   pageStarts: number[] = [];
 }
 
+const PAGE_BREAK_BACK_LINES = 1;
+
 export class TextPaginator {
   static paginate(ui: UIContext, text: string, widthVp: number, heightVp: number,
     fontSize: number, lineHeight: number): PaginationResult {
@@ -41,6 +43,9 @@ export class TextPaginator {
       return TextPaginator.fallback(text, safeWidth, safeHeight, fontSize, lineHeight);
     }
 
+    const charsPerLine = Math.max(1, Math.floor(safeWidth / Math.max(1, fontSize)));
+    const maxBack = charsPerLine * PAGE_BREAK_BACK_LINES;
+
     let start = 0;
     let guard = 0;
     while (start < text.length && guard < 20000) {
@@ -56,7 +61,7 @@ export class TextPaginator {
       if (best <= start) {
         best = start + 1;
       }
-      best = TextPaginator.preferNewline(text, start, best);
+      best = TextPaginator.preferNewline(text, start, best, maxBack);
       result.ranges.push(PageRange.of(start, best));
       result.pageStarts.push(start);
       start = best;
@@ -111,8 +116,8 @@ export class TextPaginator {
     }
   }
 
-  private static preferNewline(text: string, start: number, best: number): number {
-    const floor = Math.max(start + 1, best - 200);
+  private static preferNewline(text: string, start: number, best: number, maxBack: number): number {
+    const floor = Math.max(start + 1, best - maxBack);
     for (let i = best - 1; i >= floor; i--) {
       if (text.charAt(i) === '\n') {
         return i + 1;
@@ -130,7 +135,7 @@ export class TextPaginator {
     let start = 0;
     while (start < text.length) {
       let end = Math.min(text.length, start + pageChars);
-      end = TextPaginator.preferNewline(text, start, end);
+      end = TextPaginator.preferNewline(text, start, end, charsPerLine * PAGE_BREAK_BACK_LINES);
       if (end <= start) {
         end = start + 1;
       }

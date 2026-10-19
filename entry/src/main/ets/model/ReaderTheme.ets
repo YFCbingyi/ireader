@@ -39,21 +39,21 @@ export class ReaderTheme {
 
   static eye(): ReaderThemeColors {
     const colors = new ReaderThemeColors();
-    colors.bg = '#F7F3E8';
-    colors.text = '#2B2B2B';
-    colors.subText = '#8C8C8C';
-    colors.barBg = '#E6F7F3E8';
-    colors.barText = '#2B2B2B';
-    colors.accent = '#8B5E3C';
-    colors.accentText = '#FFF8ED';
-    colors.panelBg = '#FDFBF4';
-    colors.panelText = '#2B2B2B';
-    colors.panelSubText = '#8C8C8C';
-    colors.divider = '#EFE7D8';
-    colors.chipBg = '#EFE7D8';
-    colors.chipText = '#5C4A32';
-    colors.selectedItemBg = '#F0E4D0';
-    colors.danger = '#B85C5C';
+    colors.bg = '#CBE3D1';
+    colors.text = '#2E3A32';
+    colors.subText = '#5F7566';
+    colors.barBg = '#E6CBE3D1';
+    colors.barText = '#2E3A32';
+    colors.accent = '#3F6B4E';
+    colors.accentText = '#F2FBF6';
+    colors.panelBg = '#F2FBF6';
+    colors.panelText = '#2E3A32';
+    colors.panelSubText = '#5F7566';
+    colors.divider = '#B7D2BE';
+    colors.chipBg = '#BBD7C3';
+    colors.chipText = '#3A4A3F';
+    colors.selectedItemBg = '#B3D2BC';
+    colors.danger = '#A8474B';
     return colors;
   }
 
