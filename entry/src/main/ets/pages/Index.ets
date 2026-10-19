@@ -21,6 +21,8 @@ struct Index {
   @State importing: boolean = false;
   @State importStage: string = '';
   @State currentTab: number = TAB_BOOKSHELF;
+  @State selecting: boolean = false;
+  @State selectedIds: string[] = [];
 
   private appContext(): common.UIAbilityContext {
     return this.getUIContext().getHostContext() as common.UIAbilityContext;
@@ -34,6 +36,7 @@ struct Index {
   }
 
   onPageShow(): void {
+    this.exitSelect();
     this.loadBooks();
   }
 
@@ -73,6 +76,7 @@ struct Index {
     if (this.currentTab === index) {
       return;
     }
+    this.exitSelect();
     this.currentTab = index;
     if (index === TAB_BOOKSHELF) {
       this.loadBooks();
@@ -90,16 +94,74 @@ struct Index {
     }
   }
 
-  private confirmDelete(book: BookMeta): void {
+  private enterSelect(book: BookMeta): void {
+    this.selecting = true;
+    this.selectedIds = [book.id];
+  }
+
+  private exitSelect(): void {
+    this.selecting = false;
+    this.selectedIds = [];
+  }
+
+  private isSelected(bookId: string): boolean {
+    return this.selectedIds.indexOf(bookId) >= 0;
+  }
+
+  private toggleSelect(book: BookMeta): void {
+    if (!this.selecting) {
+      return;
+    }
+    if (this.isSelected(book.id)) {
+      const next: string[] = [];
+      for (let i = 0; i < this.selectedIds.length; i++) {
+        if (this.selectedIds[i] !== book.id) {
+          next.push(this.selectedIds[i]);
+        }
+      }
+      this.selectedIds = next;
+      if (next.length === 0) {
+        this.selecting = false;
+      }
+    } else {
+      const next: string[] = this.selectedIds.slice();
+      next.push(book.id);
+      this.selectedIds = next;
+    }
+  }
+
+  private allSelected(): boolean {
+    return this.books.length > 0 && this.selectedIds.length === this.books.length;
+  }
+
+  private toggleSelectAll(): void {
+    if (this.allSelected()) {
+      this.selectedIds = [];
+      return;
+    }
+    const next: string[] = [];
+    for (let i = 0; i < this.books.length; i++) {
+      next.push(this.books[i].id);
+    }
+    this.selectedIds = next;
+  }
+
+  private confirmBatchDelete(): void {
+    const count = this.selectedIds.length;
+    if (count === 0) {
+      return;
+    }
+    const ids: string[] = this.selectedIds.slice();
     this.getUIContext().showAlertDialog({
       title: '删除书籍',
-      message: `确定删除《${book.title}》吗？阅读进度和书签也会一并删除。`,
+      message: `确定删除选中的 ${count} 本书吗？阅读进度和书签也会一并删除。`,
       primaryButton: {
         value: '删除',
         action: () => {
-          LibraryStore.removeBook(book.id);
+          LibraryStore.removeBooks(ids);
+          this.exitSelect();
           this.loadBooks();
-          this.toast('已删除');
+          this.toast(`已删除 ${count} 本`);
         }
       },
       secondaryButton: {
@@ -331,39 +393,72 @@ struct Index {
     Stack({ alignContent: Alignment.Bottom }) {
       Column() {
         Row() {
-          Column() {
-            Text(this.tabTitle())
-              .fontSize(28)
-              .fontWeight(FontWeight.Bold)
+          if (this.selecting) {
+            Text('取消')
+              .fontSize(15)
+              .fontColor('#8B5E3C')
+              .padding({ top: 8, bottom: 8, right: 12 })
+              .onClick(() => {
+                this.exitSelect();
+              })
+            Blank()
+            Text(`已选 ${this.selectedIds.length} 本`)
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
               .fontColor('#2B2B2B')
-            Text(this.tabSubtitle())
-              .fontSize(12)
-              .fontColor('#9C8C72')
-              .margin({ top: 2 })
-          }
-          .layoutWeight(1)
-          .alignItems(HorizontalAlign.Start)
-
-          if (this.currentTab === TAB_BOOKSHELF) {
-            Button('导入TXT')
+            Blank()
+            Text(this.allSelected() ? '取消全选' : '全选')
+              .fontSize(14)
+              .fontColor('#8B5E3C')
+              .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+              .onClick(() => {
+                this.toggleSelectAll();
+              })
+            Button('删除')
               .type(ButtonType.Capsule)
-              .backgroundColor('#8B5E3C')
+              .backgroundColor(this.selectedIds.length > 0 ? '#B23A2E' : '#D9D0C2')
               .fontColor('#FFF8ED')
               .fontSize(13)
               .height(34)
+              .enabled(this.selectedIds.length > 0)
               .onClick(() => {
-                this.importTxt();
+                this.confirmBatchDelete();
               })
-            Button('图片包')
-              .type(ButtonType.Capsule)
-              .backgroundColor('#EFE7D8')
-              .fontColor('#5C4A32')
-              .fontSize(13)
-              .height(34)
-              .margin({ left: 8 })
-              .onClick(() => {
-                this.importZip();
-              })
+          } else {
+            Column() {
+              Text(this.tabTitle())
+                .fontSize(28)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#2B2B2B')
+              Text(this.tabSubtitle())
+                .fontSize(12)
+                .fontColor('#9C8C72')
+                .margin({ top: 2 })
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+
+            if (this.currentTab === TAB_BOOKSHELF) {
+              Button('导入TXT')
+                .type(ButtonType.Capsule)
+                .backgroundColor('#8B5E3C')
+                .fontColor('#FFF8ED')
+                .fontSize(13)
+                .height(34)
+                .onClick(() => {
+                  this.importTxt();
+                })
+              Button('图片包')
+                .type(ButtonType.Capsule)
+                .backgroundColor('#EFE7D8')
+                .fontColor('#5C4A32')
+                .fontSize(13)
+                .height(34)
+                .margin({ left: 8 })
+                .onClick(() => {
+                  this.importZip();
+                })
+            }
           }
         }
         .width('100%')
@@ -379,11 +474,20 @@ struct Index {
                 GridItem() {
                   BookCard({
                     book: item,
+                    selecting: this.selecting,
+                    selected: this.isSelected(item.id),
                     onOpen: (book: BookMeta): void => {
                       this.openBook(book);
                     },
                     onLongPress: (book: BookMeta): void => {
-                      this.confirmDelete(book);
+                      if (this.selecting) {
+                        this.toggleSelect(book);
+                      } else {
+                        this.enterSelect(book);
+                      }
+                    },
+                    onSelect: (book: BookMeta): void => {
+                      this.toggleSelect(book);
                     }
                   })
                 }
