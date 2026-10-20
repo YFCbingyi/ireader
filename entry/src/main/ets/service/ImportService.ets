@@ -11,9 +11,9 @@ import {
 import { AppPaths } from '../utils/AppPaths';
 import { FileUtil } from '../utils/FileUtil';
 import { NaturalSort } from '../utils/NaturalSort';
-import { TextCodec } from './TextCodec';
 import { ImageMetaReader } from './ImageMetaReader';
 import { LibraryStore } from './LibraryStore';
+import { TxtImportTask } from './TxtImportTask';
 
 const MAX_TEXT_BYTES = 50 * 1024 * 1024;
 const MAX_ZIP_ORIGINAL_BYTES = 2 * 1024 * 1024 * 1024;
@@ -31,27 +31,28 @@ export class ImportService {
     const bookId = ImportService.newId();
     const bookDir = AppPaths.bookDir(bookId);
     const bookRel = AppPaths.bookRel(bookId);
+    // 源文件先落到沙箱，TaskPool 只处理绝对路径（worker 内不可用 picker 授权的 uri 与 AppPaths）
+    const sourcePath = `${bookDir}/source.txt`;
     try {
-      onProgress('读取文本', 0, 1);
-      const bytes = FileUtil.readUriBytes(uri, MAX_TEXT_BYTES);
-      if (bytes.length === 0) {
+      onProgress('复制文件', 0, 1);
+      FileUtil.ensureDir(bookDir);
+      FileUtil.copyUriToFile(uri, sourcePath);
+      if (FileUtil.fileSize(sourcePath) <= 0) {
         throw new Error('文件为空');
       }
-      onProgress('识别编码', 0, 1);
-      const text = TextCodec.normalize(TextCodec.decode(bytes));
-      if (text.trim().length === 0) {
-        throw new Error('文本内容为空');
-      }
       const title = ImportService.titleFromUri(uri);
-      onProgress('切分章节', 0, 1);
-      const drafts = TextCodec.splitChapters(text, title);
-      FileUtil.ensureDir(`${bookDir}/text`);
+      // 解析、切分与逐章写盘都在 TaskPool 内完成，不占用 UI 线程
+      onProgress('解析章节', 0, 0);
+      const parsed = await TxtImportTask.parse(sourcePath, `${bookDir}/text`, bookRel,
+        title, MAX_TEXT_BYTES);
+      if (parsed.chapters.length === 0) {
+        throw new Error('未解析出任何章节');
+      }
+      onProgress('写入书架', 0, 1);
       const manifest = new BookManifest();
-      for (let i = 0; i < drafts.length; i++) {
-        const relFile = `${bookRel}/text/${ImportService.pad4(i)}.txt`;
-        FileUtil.writeText(AppPaths.abs(relFile), drafts[i].content);
-        manifest.chapters.push(ChapterMeta.text(drafts[i].title, relFile, drafts[i].content.length));
-        onProgress('写入章节', i + 1, drafts.length);
+      for (let i = 0; i < parsed.chapters.length; i++) {
+        const item = parsed.chapters[i];
+        manifest.chapters.push(ChapterMeta.text(item.title, item.relFile, item.charCount));
       }
       LibraryStore.saveManifest(bookId, manifest);
       const book = BookMeta.of(bookId, title, BookType.TEXT, manifest.chapters.length);
@@ -60,6 +61,9 @@ export class ImportService {
     } catch (e) {
       FileUtil.deleteRecursive(bookDir);
       return ImportResult.fail(ImportService.errorMessage(e as Error));
+    } finally {
+      // 源文件仅导入期需要，成功路径清掉避免占用双份磁盘
+      FileUtil.deleteRecursive(sourcePath);
     }
   }
 

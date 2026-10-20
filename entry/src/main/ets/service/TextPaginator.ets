@@ -20,8 +20,12 @@ export class PaginationResult {
 const PAGE_BREAK_BACK_LINES = 1;
 
 export class TextPaginator {
+  /**
+   * 把整章文本切页。
+   * @param firstPageExtraHeight 首页被标题等元素占用的高度（vp），仅首页扣减
+   */
   static paginate(ui: UIContext, text: string, widthVp: number, heightVp: number,
-    fontSize: number, lineHeight: number): PaginationResult {
+    fontSize: number, lineHeight: number, firstPageExtraHeight: number = 0): PaginationResult {
     const result = new PaginationResult();
     if (text.length === 0) {
       result.ranges.push(PageRange.of(0, 0));
@@ -30,6 +34,7 @@ export class TextPaginator {
     }
     const safeWidth = Math.max(1, widthVp);
     const safeHeight = Math.max(1, heightVp);
+    const extraHeight = firstPageExtraHeight > 0 ? firstPageExtraHeight : 0;
     const utils = ui.getMeasureUtils();
     let density = 1;
     try {
@@ -40,7 +45,7 @@ export class TextPaginator {
     const pageHeightPx = safeHeight * density;
     const probe = TextPaginator.measureHeight(utils, '测试文本', safeWidth, fontSize, lineHeight);
     if (probe <= 0) {
-      return TextPaginator.fallback(text, safeWidth, safeHeight, fontSize, lineHeight);
+      return TextPaginator.fallback(text, safeWidth, safeHeight, fontSize, lineHeight, extraHeight);
     }
 
     const charsPerLine = Math.max(1, Math.floor(safeWidth / Math.max(1, fontSize)));
@@ -50,13 +55,17 @@ export class TextPaginator {
     let guard = 0;
     while (start < text.length && guard < 20000) {
       guard++;
+      // 首页需要扣掉标题占用的高度
+      const pageHeight = result.ranges.length === 0
+        ? Math.max(1, pageHeightPx - extraHeight * density)
+        : pageHeightPx;
       let maxEnd = Math.min(text.length, start + 2500);
       let best = TextPaginator.measureEnd(utils, text, start, maxEnd, safeWidth, fontSize,
-        lineHeight, pageHeightPx);
+        lineHeight, pageHeight);
       if (best >= maxEnd && maxEnd < text.length) {
         maxEnd = Math.min(text.length, start + 8000);
         best = TextPaginator.measureEnd(utils, text, start, maxEnd, safeWidth, fontSize,
-          lineHeight, pageHeightPx);
+          lineHeight, pageHeight);
       }
       if (best <= start) {
         best = start + 1;
@@ -127,14 +136,17 @@ export class TextPaginator {
   }
 
   private static fallback(text: string, widthVp: number, heightVp: number,
-    fontSize: number, lineHeight: number): PaginationResult {
+    fontSize: number, lineHeight: number, firstPageExtraHeight: number): PaginationResult {
     const result = new PaginationResult();
     const charsPerLine = Math.max(1, Math.floor(widthVp / Math.max(1, fontSize)));
-    const linesPerPage = Math.max(1, Math.floor(heightVp / Math.max(1, lineHeight)));
+    const lineUnit = Math.max(1, lineHeight);
+    const linesPerPage = Math.max(1, Math.floor(heightVp / lineUnit));
+    const firstPageLines = Math.max(1, Math.floor(Math.max(0, heightVp - firstPageExtraHeight) / lineUnit));
     const pageChars = Math.max(1, charsPerLine * linesPerPage);
+    const firstPageChars = Math.max(1, charsPerLine * firstPageLines);
     let start = 0;
     while (start < text.length) {
-      let end = Math.min(text.length, start + pageChars);
+      let end = Math.min(text.length, start + (result.ranges.length === 0 ? firstPageChars : pageChars));
       end = TextPaginator.preferNewline(text, start, end, charsPerLine * PAGE_BREAK_BACK_LINES);
       if (end <= start) {
         end = start + 1;

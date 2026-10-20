@@ -14,6 +14,7 @@
  */
 
 import { AbilityConstant, Configuration, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 
@@ -65,6 +66,22 @@ export default class EntryAbility extends UIAbility {
       }
       hilog.info(DOMAIN, 'testTag', 'Succeeded in loading the content.');
     });
+
+    this.applyImmersiveLayout(windowStage);
+  }
+
+  private applyImmersiveLayout(windowStage: window.WindowStage): void {
+    try {
+      const mainWindow: window.Window = windowStage.getMainWindowSync();
+      mainWindow.setWindowLayoutFullScreen(true).catch((err: BusinessError) => {
+        hilog.error(DOMAIN, 'testTag', 'setWindowLayoutFullScreen failed: %{public}s', err.message);
+      });
+      mainWindow.setWindowSystemBarEnable(['status', 'navigation']).catch((err: BusinessError) => {
+        hilog.error(DOMAIN, 'testTag', 'setWindowSystemBarEnable failed: %{public}s', err.message);
+      });
+    } catch (err) {
+      hilog.error(DOMAIN, 'testTag', 'applyImmersiveLayout failed: %{public}s', JSON.stringify(err));
+    }
   }
 
   onWindowStageDestroy(): void {
