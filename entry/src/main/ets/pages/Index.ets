@@ -1,5 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { picker } from '@kit.CoreFileKit';
+import { window } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { BookMeta, ImportResult, ReaderParams } from '../model/BookModels';
 import { AppPaths } from '../utils/AppPaths';
@@ -23,6 +24,8 @@ struct Index {
   @State currentTab: number = TAB_BOOKSHELF;
   @State selecting: boolean = false;
   @State selectedIds: string[] = [];
+  @State topInset: number = 0;
+  @State bottomInset: number = 0;
 
   private appContext(): common.UIAbilityContext {
     return this.getUIContext().getHostContext() as common.UIAbilityContext;
@@ -38,10 +41,50 @@ struct Index {
   onPageShow(): void {
     this.exitSelect();
     this.loadBooks();
+    this.ensureFullScreenWindow();
+    this.refreshInsets();
+    // 阅读页恢复系统栏是异步操作，稍后再测量一次安全区，避免拿到旧值
+    setTimeout(() => {
+      this.refreshInsets();
+    }, 150);
   }
 
   private loadBooks(): void {
     this.books = LibraryStore.getBooks();
+  }
+
+  private async ensureFullScreenWindow(): Promise<void> {
+    try {
+      const win = await window.getLastWindow(this.appContext());
+      await win.setWindowLayoutFullScreen(true);
+      await win.setWindowSystemBarEnable(['status', 'navigation']);
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`ensure full screen window failed: ${err.message}`);
+    }
+  }
+
+  private async refreshInsets(): Promise<void> {
+    try {
+      const win = await window.getLastWindow(this.appContext());
+      const systemArea: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+      const cutoutArea: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_CUTOUT);
+      const indicatorArea: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
+      // 刘海/挖孔区域比状态栏更高时取较大值，保证标题不被遮挡
+      const top = Math.max(px2vp(systemArea.topRect.height), px2vp(cutoutArea.topRect.height));
+      const bottom = px2vp(indicatorArea.bottomRect.height);
+      this.topInset = top > 0 ? top : 0;
+      this.bottomInset = bottom > 0 ? bottom : 0;
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`refresh insets failed: ${err.message}`);
+      this.topInset = 0;
+      this.bottomInset = 0;
+    }
+  }
+
+  private tabBarInset(): number {
+    return this.bottomInset + TAB_BAR_INSET;
   }
 
   private toast(message: string): void {
@@ -290,7 +333,7 @@ struct Index {
     .layoutWeight(1)
     .justifyContent(FlexAlign.Center)
     .alignItems(HorizontalAlign.Center)
-    .padding({ left: 28, right: 28, bottom: TAB_BAR_INSET - 30 })
+    .padding({ left: 28, right: 28, bottom: this.tabBarInset() - 30 })
   }
 
   @Builder
@@ -386,7 +429,7 @@ struct Index {
     .backgroundColor('#F5FFFDF7')
     .border({ width: 1, color: '#EFE7D8' })
     .shadow({ radius: 22, color: '#268B5E3C', offsetX: 0, offsetY: 8 })
-    .margin({ bottom: 28 })
+    .margin({ bottom: this.bottomInset + 16 })
   }
 
   build() {
@@ -462,7 +505,7 @@ struct Index {
           }
         }
         .width('100%')
-        .padding({ left: 20, right: 20, top: 18, bottom: 14 })
+        .padding({ left: 20, right: 20, top: this.topInset + 18, bottom: 14 })
         .alignItems(VerticalAlign.Center)
 
         if (this.currentTab === TAB_BOOKSHELF) {
@@ -497,13 +540,13 @@ struct Index {
             .columnsGap(12)
             .width('100%')
             .layoutWeight(1)
-            .padding({ left: 20, right: 20, top: 6, bottom: TAB_BAR_INSET })
+            .padding({ left: 20, right: 20, top: 6, bottom: this.tabBarInset() })
             .scrollBar(BarState.Off)
           }
         } else if (this.currentTab === TAB_DISCOVER) {
           DiscoverPanel()
         } else {
-          ProfilePanel({ bottomInset: TAB_BAR_INSET })
+          ProfilePanel({ bottomInset: this.tabBarInset() })
         }
       }
       .width('100%')
@@ -532,5 +575,6 @@ struct Index {
     .width('100%')
     .height('100%')
     .backgroundColor('#F7F4EE')
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 }
