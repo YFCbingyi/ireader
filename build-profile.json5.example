@@ -1,0 +1,65 @@
+// 签名配置模板
+//
+// 使用方法：
+//   1) 复制本文件为 build-profile.json5（同目录）；该文件已被 .gitignore 排除，不会入库
+//   2) 推荐直接用 DevEco Studio 打开工程 → File → Project Structure → Signing Configs
+//      → 勾选 Automatically generate signature，由 IDE 自动填写下列各项并签发生成本机证书
+//      （证书默认落在 ~/.ohos/config/）
+//
+// 注意：真实的 build-profile.json5 内含证书绝对路径与明文密码，绝不能提交到版本库。
+{
+  app: {
+    signingConfigs: [
+      {
+        name: 'default',
+        type: 'HarmonyOS',
+        material: {
+          certpath: 'C:\\Users\\<用户名>\\.ohos\\config\\default_ireader_<hash>.cer',
+          keyAlias: 'debugKey',
+          keyPassword: '<由 DevEco Studio 生成>',
+          profile: 'C:\\Users\\<用户名>\\.ohos\\config\\default_ireader_<hash>.p7b',
+          signAlg: 'SHA256withECDSA',
+          storeFile: 'C:\\Users\\<用户名>\\.ohos\\config\\default_ireader_<hash>.p12',
+          storePassword: '<由 DevEco Studio 生成>',
+        },
+      },
+    ],
+    products: [
+      {
+        name: 'default',
+        signingConfig: 'default',
+        targetSdkVersion: '6.1.1(24)',
+        compatibleSdkVersion: '6.1.1(24)',
+        runtimeOS: 'HarmonyOS',
+        buildOption: {
+          strictMode: {
+            caseSensitiveCheck: true,
+            useNormalizedOHMUrl: true,
+          },
+        },
+      },
+    ],
+    buildModeSet: [
+      {
+        name: 'debug',
+      },
+      {
+        name: 'release',
+      },
+    ],
+  },
+  modules: [
+    {
+      name: 'entry',
+      srcPath: './entry',
+      targets: [
+        {
+          name: 'default',
+          applyToProducts: [
+            'default',
+          ],
+        },
+      ],
+    },
+  ],
+}
