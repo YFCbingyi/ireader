@@ -14,6 +14,9 @@ const TAB_BOOKSHELF = 0;
 const TAB_DISCOVER = 1;
 const TAB_PROFILE = 2;
 const TAB_BAR_INSET = 112;
+// TXT 支持一次多选导入；图片书一次只能导入一个 ZIP（子目录即章节，多包易混淆）
+const TXT_MAX_SELECT = 20;
+const ZIP_MAX_SELECT = 1;
 
 @Entry
 @Component
@@ -228,6 +231,11 @@ struct Index {
     }
   }
 
+  /**
+   * 导入 TXT：支持一次多选。
+   * 串行逐本导入（避免多个 taskpool 任务同时读盘争 IO），单本失败不影响后续，
+   * 结束后统一刷新书架并汇总结果。
+   */
   private async importTxt(): Promise<void> {
     if (this.importing) {
       return;
@@ -236,7 +244,7 @@ struct Index {
     try {
       const options = new picker.DocumentSelectOptions();
       options.fileSuffixFilters = ['文本文件|.txt'];
-      options.maxSelectNumber = 1;
+      options.maxSelectNumber = TXT_MAX_SELECT;
       const docPicker = new picker.DocumentViewPicker(context);
       const uris: string[] = await docPicker.select(options);
       if (uris.length === 0) {
@@ -244,11 +252,29 @@ struct Index {
       }
       this.importing = true;
       this.importStage = '准备导入';
-      const result = await ImportService.importTxt(uris[0],
-        (stage: string, current: number, total: number): void => {
-          this.importStage = total > 1 ? `${stage} ${current}/${total}` : stage;
-        });
-      this.handleImportResult(result);
+      const count = uris.length;
+      let okCount = 0;
+      let okTitle = '';
+      let skippedImages = 0;
+      let firstError = '';
+      for (let i = 0; i < count; i++) {
+        const prefix = count > 1 ? `第 ${i + 1}/${count} 本 · ` : '';
+        this.importStage = `${prefix}准备导入`;
+        const result = await ImportService.importTxt(uris[i],
+          (stage: string, current: number, total: number): void => {
+            const detail = total > 1 ? `${stage} ${current}/${total}` : stage;
+            this.importStage = `${prefix}${detail}`;
+          });
+        if (result.success) {
+          okCount++;
+          okTitle = result.title;
+          skippedImages += result.skippedImages;
+        } else if (firstError.length === 0) {
+          firstError = count > 1 ? `第 ${i + 1} 本：${result.message}` : result.message;
+        }
+      }
+      this.loadBooks();
+      this.reportImportSummary(okCount, count, okTitle, skippedImages, firstError);
     } catch (e) {
       const err = e as BusinessError;
       if (err.message !== undefined && err.message.length > 0) {
@@ -260,6 +286,33 @@ struct Index {
     }
   }
 
+  /** 多选导入的汇总提示：全成功只报数量，有失败时带首个失败原因 */
+  private reportImportSummary(okCount: number, total: number, okTitle: string,
+    skippedImages: number, firstError: string): void {
+    if (total <= 1) {
+      if (okCount === 1) {
+        this.toast(skippedImages > 0
+          ? `已导入《${okTitle}》，跳过 ${skippedImages} 张超大或损坏图片`
+          : `已导入《${okTitle}》`);
+      } else {
+        this.toast(`导入失败：${firstError.length > 0 ? firstError : '未知错误'}`);
+      }
+      return;
+    }
+    if (okCount === total) {
+      this.toast(skippedImages > 0
+        ? `已导入 ${okCount} 本，跳过 ${skippedImages} 张超大或损坏图片`
+        : `已导入 ${okCount} 本`);
+      return;
+    }
+    if (okCount === 0) {
+      this.toast(`${total} 本均导入失败：${firstError.length > 0 ? firstError : '未知错误'}`);
+      return;
+    }
+    this.toast(`已导入 ${okCount} 本，${total - okCount} 本失败：${firstError}`);
+  }
+
+  /** 导入图片书：一次只能选一个 ZIP */
   private async importZip(): Promise<void> {
     if (this.importing) {
       return;
@@ -268,7 +321,7 @@ struct Index {
     try {
       const options = new picker.DocumentSelectOptions();
       options.fileSuffixFilters = ['压缩包|.zip'];
-      options.maxSelectNumber = 1;
+      options.maxSelectNumber = ZIP_MAX_SELECT;
       const docPicker = new picker.DocumentViewPicker(context);
       const uris: string[] = await docPicker.select(options);
       if (uris.length === 0) {
@@ -324,7 +377,7 @@ struct Index {
       }
       .margin({ top: 28 })
 
-      Text('TXT 支持 UTF-8 / GBK；图片包为 ZIP，子目录即章节')
+      Text('TXT 支持 UTF-8 / GBK，可一次多选；图片包为 ZIP，单次一个，子目录即章节')
         .fontSize(12)
         .fontColor('#A8A8A8')
         .margin({ top: 22 })

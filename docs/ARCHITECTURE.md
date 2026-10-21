@@ -1,0 +1,334 @@
+# ireader 核心架构
+
+> 本文档描述当前代码的真实结构（HarmonyOS Stage 模型 / ArkTS），用于后续迭代时快速定位改动点。
+> 与代码不一致时以代码为准，改动后请同步更新本文档。
+
+## 1. 产品形态
+
+一个本地 TXT / 图片（ZIP）阅读器，书架式多书管理：
+
+- **TXT 书**：导入后按章节切分、逐章落盘；支持上下连续卷轴与左右分页两种模式。
+- **图片书**：ZIP 解压后按目录成章，支持上下连续滚动（图片流）与左右翻页（一图一页），竖排支持双指缩放。
+
+两种模式共享同一套 `ChapterMeta` 元数据与 `ReadingProgress` 进度模型，渲染层是两套独立容器。
+
+## 2. 技术栈与约束
+
+| 项 | 选择 |
+|---|---|
+| UI | ArkUI 声明式，Stage 模型，单 Ability（`EntryAbility`） |
+| 构建 | hvigor（`assembleHap`），hdc 安装 |
+| 状态 | 组件内 `@State`/`@Prop` + `@StorageProp`（仅 `systemColorMode`、`appActive`） |
+| 持久化 | 沙箱 JSON 文件（无 Preferences、无数据库） |
+| 文本解码 | `TextCodec`（BOM / UTF-8 / GBK 探测） |
+| 大文件解析 | `taskpool` + `@Concurrent`（`TxtImportTask`） |
+| 分页测量 | `UIContext.getMeasureUtils().measureTextSize` 二分测高 |
+| 第三方依赖 | 无 |
+
+ArkTS 硬约束（踩过的坑）：
+
+- 变量必须显式类型，禁止隐式 `any`。
+- `static` 方法内不能用 `this`。
+- 不支持 `Function.prototype.apply/call`。
+- 读文本用 `util.TextDecoder`，禁用 `String.fromCharCode.apply`。
+- `@Concurrent` 函数只能引用 import 的符号或局部变量（不能在 worker 里调用同文件的私有函数）。
+- taskpool 参数/返回值必须可序列化，**不能传自定义 class 实例、不能传 Context**。
+
+## 3. 目录结构
+
+```
+entry/src/main/ets/
+├── model/
+│   ├── BookModels.ets        # 全部领域模型与枚举（BookType / ReadingMode / ReadingProgress /
+│   │                         #   BookMeta / ChapterMeta / ImageEntry / BookManifest / Bookmark /
+│   │                         #   ReaderSettings / ImportResult / ImportProgressCallback）
+│   ├── ReaderTheme.ets       # ReadingTheme 枚举 + ReaderThemeColors 三套配色
+│   └── ReadingStats.ets      # 阅读时长统计模型
+├── service/
+│   ├── ImportService.ets     # importTxt（走 taskpool）/ importZip（解压 + 扫描）
+│   ├── TxtImportTask.ets     # @Concurrent 解析任务：读盘 → 解码 → 切分 → 逐章写盘 → 返回 JSON
+│   ├── TextCodec.ets         # 编码识别 + 章节切分（decode / normalize / splitChapters）
+│   ├── TextPaginator.ets     # 单章分页（measureTextSize 二分测高 + 换行回退）
+│   ├── ImageMetaReader.ets   # 读取图片宽高，产出 ImageEntry
+│   ├── LibraryStore.ets      # 书架/清单/设置/书签的 JSON 读写
+│   ├── ReadingStatsStore.ets # 阅读时长累计
+│   └── (无 EdgeTurnTracker —— 已删除)
+├── components/
+│   ├── BookCard.ets          # 书架卡片
+│   ├── DiscoverPanel.ets     # 发现页占位
+│   ├── ProfilePanel.ets      # 统计面板
+│   └── reader/
+│       ├── TextReaderView.ets   # 文本书：竖排块窗口 + 左右页窗口
+│       ├── ImageReaderView.ets  # 图片书：竖排图片块窗口 + 左右图片页窗口
+│       ├── ImageDataSource.ets  # ImagePage + 跨章图片页数据源
+│       └── ReaderPanels.ets     # 目录 / 书签 / 设置三面板
+├── pages/
+│   ├── Index.ets             # 书架首页 + 导入入口 + 三 Tab
+│   ├── Reader.ets            # 阅读页壳：加载、切章、进度、遮挡、模式切换
+│   └── Profile.ets           # 个人页容器
+├── utils/
+│   ├── AppPaths.ets          # filesDir 初始化、相对/绝对路径与 uri 换算
+│   ├── FileUtil.ets          # 同步/异步文件 IO
+│   └── NaturalSort.ets       # 文件名自然排序（图片章序）
+└── entryability/EntryAbility.ets  # 写 systemColorMode / appActive 到 AppStorage
+```
+
+## 4. 数据模型（`model/BookModels.ets`）
+
+```ts
+enum BookType { TEXT = 'text', IMAGE = 'image' }
+enum ReadingMode { VERTICAL = 'vertical', HORIZONTAL = 'horizontal' }
+
+class ChapterMeta {
+  title: string;
+  contentFile: string;   // TXT：相对路径 books/{id}/text/0001.txt
+  charCount: number;     // TXT：正文字符数（进度与百分比用）
+  images: ImageEntry[];  // IMAGE：该章图片
+}
+
+class ImageEntry { file: string; width: number; height: number; }
+
+class BookManifest { version: number; chapters: ChapterMeta[]; }
+
+class BookMeta {
+  id; title; type: BookType; coverFile; chapterCount;
+  readingMode: ReadingMode;
+  progress: ReadingProgress;
+  createdAt; updatedAt;
+}
+
+class ReadingProgress {
+  chapterIndex: number;   // 章号（不是 id）
+  charOffset: number;     // TXT：章内字符偏移
+  pageIndex: number;      // IMAGE：章内图片序号
+  scrollRatio: number;    // 章内比例（0..1）
+  percent: number;        // 全书百分比（按章等权）
+  updatedAt: number;
+}
+
+class ReaderSettings { fontSize = 18; lineHeightRatio = 1.7; theme = EYE; }
+
+class Bookmark {
+  id; bookId; chapterIndex; chapterTitle;
+  charOffset; pageIndex; scrollRatio; preview; createdAt;
+}
+```
+
+**核心设计**：正文不内联在模型里。`ChapterMeta` 只存**文件路径 + 字符数**，正文按章从磁盘读。这是 10MB 级 TXT 不爆内存的前提。
+
+## 5. 持久化布局（沙箱 `filesDir`）
+
+```
+filesDir/
+├── library.json                 # BookMeta[]（书架，按 updatedAt 倒序）
+├── settings.json                # ReaderSettings（全局字号/行距/主题）
+├── reading_stats.json           # 阅读时长
+├── bookmarks/{bookId}.json      # Bookmark[]
+└── books/{bookId}/
+    ├── manifest.json            # BookManifest
+    ├── text/0001.txt ...        # TXT 每章一个文件（4 位补零）
+    ├── content/...              # 图片书解压结果（按目录成章）
+    ├── source.txt               # TXT 导入临时文件（成功后删除）
+    └── source.zip               # 图片书原始压缩包
+```
+
+读写入口统一为 `LibraryStore`（`getBooks/getBook/saveBook/getManifest/saveManifest/getSettings/saveSettings/getBookmarks/saveBookmarks`），底层是 `FileUtil.readText/writeTextAtomic`。
+
+## 6. 导入链路
+
+```mermaid
+flowchart LR
+  A[DocumentViewPicker<br>.txt / .zip] --> B{类型}
+  B -- TXT --> C[copyUriToFile -> source.txt]
+  C --> D[taskpool.execute TxtImportTask]
+  D --> E[读盘 + TextCodec.decode/normalize<br>+ splitChapters + 逐章 writeText]
+  E --> F[返回 JSON: chapters/trimmed/charCount]
+  F --> G[主线程建 BookManifest + BookMeta]
+  G --> H[LibraryStore.saveManifest/saveBook]
+  B -- ZIP --> I[copy -> source.zip]
+  I --> J[zlib.decompressFile -> content/]
+  J --> K[scanChapters 按目录成章<br>ImageMetaReader 读宽高]
+  K --> H
+```
+
+- 进度回调只有三档：`复制文件` / `解析章节` / `写入书架`。taskpool 内不做逐章回传（跨线程回调成本高）。
+- 失败统一 `FileUtil.deleteRecursive(bookDir)` 回滚。
+- 图片书限制：压缩包原始大小与解压后总大小都有上限，超限图片计入 `skippedImages`。
+
+## 7. 阅读页壳（`pages/Reader.ets`）
+
+职责：加载书架数据、维护进度与书签、向渲染组件下发跳转目标、控制遮挡与沉浸式。
+
+```
+aboutToAppear
+  ├─ AppPaths.init / LibraryStore.init
+  ├─ 读 BookMeta / ReaderSettings / BookManifest / Bookmarks
+  ├─ applyTheme + fontSize/lineHeight + readingMode
+  └─ openChapter(savedChapter, charOffset, pageIndex, scrollRatio, false)
+```
+
+关键成员：
+
+| 成员 | 说明 |
+|---|---|
+| `book / manifest / settings / bookmarks` | 数据源 |
+| `progressChapter / progressCharOffset / progressPageIndex / progressRatio` | 当前锚点（唯一真相） |
+| `jumpChapter / jumpOffset / jumpIndex / jumpRatio / jumpVersion` | 下发给子组件的跳转指令 |
+| `loadVersion` | 触发子组件重新加载（左右模式重分页） |
+| `turnMaskVisible` | 纯色遮挡，只在按钮/目录/书签触发的 `openChapter` 出现 |
+| `chapterTextCache / cacheKeys` | 章节全文 LRU：最多 12 章、单章 ≤ 40 万字符 |
+| `readingMode` | 来自 `book.readingMode`（**每本书独立**） |
+
+关键流程：
+
+- **切章**：`previousChapter()` / `nextChapter()` / `jumpToChapter(index)` / `jumpToBookmark(bm)` 全部收敛到 `openChapter(index, charOffset, imageIndex, ratio, save)`。
+  - 竖排：立即 `applyJump()` 下发目标，子组件异步按窗口取文，不等待整章读盘。
+  - 左右 / 图片书：`await loadTextChapter()` 后 `applyJump()`，并 `prefetchAround()` 预热 ±2 章。
+- **上一章落点 = 上一章末尾**（`charOffset = charCount`，图片书 = 最后一张）；**下一章 / 目录落点 = 章首**。
+- **进度保存**：`onTextProgress` / `onImageProgress` 写入 `progress*` 字段 → `scheduleSave()`（800ms 防抖）→ `flushProgress()`；`onPageHide` / `aboutToDisappear` / `onBackPress` / 切章 / 切模式立刻 flush。
+- **百分比**：`computePercent() = (chapterIndex + 章内比例) / chapterCount`，**按章等权**，不依赖总页数（左右模式懒分页因此无需全书页数）。
+- **模式切换**：`changeMode()` 写 `book.readingMode` 后以当前锚点重新 `openChapter`，目标模式自行定位。
+- **字号/行距/主题**：`changeFontSize`（钳制 14–30）/ `changeLineHeight` / `changeTheme` → `LibraryStore.saveSettings`。
+
+## 8. 文本书渲染（`components/reader/TextReaderView.ets`）
+
+一个组件承载两种模式，由 `@Prop mode` 切换。两种模式共用 `chapterTextProvider`（父组件注入的按章取文回调，带缓存）与 `chapterTitleOf`。
+
+### 8.1 竖排：跨章块窗口
+
+数据单位是 `ReaderBlock`：
+
+```
+ReaderBlock { kind: 'title' | 'text', text, chapterIndex, start, end }
+```
+
+每章被切成 `[章标题块] + [正文块...]`，正文每块约 600 字且尽量在换行处断开（`CHUNK_CHARS=600`，`CHUNK_NEWLINE_SLACK=160`）。
+
+窗口参数：
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `WINDOW_RADIUS` | 2 | 初始窗口 = 目标章 ± 2 |
+| `WINDOW_MAX_CHAPTERS` | 8 | 窗口章数上限 |
+| `LOAD_AHEAD_BLOCKS` | 12 | 距端部不足 12 块时补章 |
+
+```mermaid
+flowchart TD
+  A[List.onScrollIndex start,end] --> B{pendingScrollIndex?}
+  B -- 有 --> C[consumePendingScroll 无动画定位]
+  B -- 无 --> D{anchorChapter?}
+  D -- 有 --> E[按锚点重定位并补偿]
+  D -- 无 --> F[updateProgressFromCenter<br>中心块 -> 当前章/偏移]
+  F --> G[maybeLoadMore 补章]
+  G --> H[maybeTrim 回收远端章]
+```
+
+- **数据源** `ReaderBlockSource`：`reset` / `append` / `prepend` / `removeHead` / `removeTail`，增量走 `onDataAdd` / `onDataDelete`，避免整表 `onDataReloaded`。
+- **前插补偿**：前插前 `captureAnchor()` 记录首可见块的（章, 偏移），插入后 `findBlockIndex()` + `scrollToIndex(index, false, START)` 无动画补偿。
+- **回收补偿**：回收头部前同样 `captureAnchor()`，下一帧按锚点重定位。
+- **当前章判定**：进度、目录高亮、页脚章号都取 `floor((start+end)/2)` 的中心块所属章；`firstVisibleIndex` 只用于定位与补偿。
+- **跳转**：父组件 `jumpVersion++` → `onJump()` → 延迟一帧 `initWindow(jumpChapter, jumpOffset)` → 重建窗口 + `pendingScrollIndex` 定位 → `signalReady()` → 父组件揭开遮挡。
+- **进度上报**：`updateProgressFromBlocks` 内部 400ms 节流后 `onProgress(chapter, offset, ratio)`。
+
+### 8.2 左右：跨章页窗口
+
+数据单位是 `PagedItem`：
+
+```ts
+class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; start; }
+```
+
+窗口参数：
+
+| 常量 | 值 | 含义 |
+|---|---|---|
+| `PAGE_WINDOW_RADIUS` | 1 | 初始窗口 = 当前章 ± 1 |
+| `PAGE_WINDOW_MAX_CHAPTERS` | 5 | 窗口章数上限 |
+| `PAGE_LOAD_AHEAD` | 2 | 距窗口两端不足 2 页时补章 |
+| `PAGE_CACHE_LIMIT` | 6 | 章级分页缓存上限（LRU） |
+
+- **数据源** `PagedSource`：`reset` / `appendChapter` / `prependChapter` / `removeHeadChapter` / `removeTailChapter` / `chapterStartIndex` / `itemAt`。
+- **建窗** `initPageWindow(center, charOffset)`：`Promise.all` 并发对 `center-1..center+1` 分页 → 扁平拼接 → `reset` → `findPageIndex` → `changeIndex(index, false)` 无动画落位 → `reportCurrent()`。
+- **分页缓存** `pagesOfChapterAsync(chapter)`：缓存键 = `宽 x 高 | fontSize | lineHeightRatio | titleExtra`，命中直接复用该章 `PagedItem[]`，未命中才 `chapterTextProvider` 取文 + `TextPaginator.paginate`。
+- **补章**：`ensurePageWindow(index)` 判距两端页数，`appendNextChapter` 不影响索引；`prependPrevChapter` 前插后 `currentPage += added` 并 `changeIndex(..., false)` 补偿。
+- **回收**：超 5 章时回收离当前章更远的一端，回收头部时 `currentPage -= removed` 并补偿。
+- **误报抑制**：任何结构变更（reset / prepend / 头部回收）前调 `beginPageSync()`，48ms 内 `handlePageChange` 只同步索引、不上报进度、不触发窗口维护。这是"翻一页跳两页"的唯一防线。
+- **每章第 0 页**顶部渲染该章标题（分页时用 `firstPageExtraHeight` 扣掉标题高度），页眉常驻当前页所属章名。
+- **页脚**：`第 x/y 章 · z%`，不含页号。
+
+## 9. 图片书渲染（`components/reader/ImageReaderView.ets`）
+
+图片数据来自 `manifest.chapters[i].images`（内存中已有宽高，无需读盘）。
+
+- **竖排**：`ImageBlock { kind:'title'|'image', chapterIndex, title, image, imageIndex }`，窗口 `±2`（上限 8 章，距端部 8 块补章）。高度按原始宽高比换算（`width * height / width`），维护 `blockHeights/blockPrefix` 用于偏移换算；支持双指缩放（0.2–3.0）与横向平移。
+- **左右**：`ImagePage { key, chapter, imageIndex, image }`，窗口 `±1`（上限 5 章，距端部 2 页补章）。**不插章标题页**，第 0 张图即该章第一页，章名只出现在顶部页眉。空章直接跳过，避免死循环。
+
+## 10. 进度、恢复与书签
+
+- 退出/隐藏/切章/切模式都会写回 `BookMeta.progress`，并更新 `book.updatedAt`（书架排序依据）。
+- 打开时以 `progress.chapterIndex + charOffset` 作为窗口中心；竖排走 `initWindow`，左右走 `initPageWindow`，图片书走 `initWindow/reloadAt`。
+- 书签记录 `chapterIndex + charOffset + pageIndex + scrollRatio + preview`；`updateBookmarkState()` 按"同章 + 同偏移/同页"判断当前是否已加书签。
+- 阅读时长另由 `ReadingStatsStore` 按 30s 心跳累计，与进度链路解耦。
+
+## 11. 关键不变量（改代码前必读）
+
+1. **补偿必须无动画**：`scrollToIndex(..., false, ...)` / `changeIndex(..., false)`。带动画补偿一定会被看见。
+2. **前插与锁成对**：`prepend*` / `reset` / 头部回收 之前必须 `beginPageSync()`，否则 Swiper/List 的临时索引会被当成用户翻页。
+3. **不要直接改 `.index`**：左右模式跳页一律 `swiperController.changeIndex(target, animate)`，直接改 `.index` 动效不生效。
+4. **LazyForEach key 必须唯一稳定**：竖排 `` `${chapterIndex}_${kind}_${start}_${len}` ``，左右 `` `${item.key}_${text.length}` ``，图片 `page.key`。
+5. **窗口有上限**：竖排 8 章、左右 5 章，超限必须回收端部章，否则内存随阅读时长线性增长。
+6. **空章必须跳过**：图片书 `images.length === 0` 时只推进 `pageWindowEnd` 不产页，否则 `ensurePageWindow` 会原地死循环。
+7. **`chapterTextProvider` 必须幂等且带缓存**：竖排 ±2 章 + 左右 ±1 章会并发调用，父组件 `loadChapterTextAsync` 已做 12 章 LRU。
+8. **`TextPaginator` 的 `firstPageExtraHeight` 必须与真实渲染的标题高度一致**，否则每章末页会溢出或留白。
+9. **taskpool 任务内禁用 `AppPaths` / `Context`**：所有路径由主线程算好，以纯字符串传入。
+10. **竖排顶部无固定章名**：章名只作为正文流中的一块出现，不要再加回 header。
+
+## 12. 性能与内存模型
+
+| 资源 | 上限 |
+|---|---|
+| 竖排常驻章 | `WINDOW_MAX_CHAPTERS = 8` 章块 |
+| 左右常驻章 | `PAGE_WINDOW_MAX_CHAPTERS = 5` 章页 + 6 章分页缓存 |
+| 章节全文缓存 | 12 章 × ≤ 40 万字符 |
+| 单章分页成本 | `measureTextSize` 二分，页数 × log(候选长度)；`guard` 上限 20000 页 |
+| 图片书常驻章 | 竖排 8 章 / 左右 5 章（仅元数据 + uri，不解码位图） |
+
+分页只在窗口端部发生，单次 1 章；补章不阻塞主线程（`await` 取文 + 同步测量）。
+
+## 13. 已知取舍
+
+- **10MB 书的导入耗时**：`TxtImportTask` 只解决主线程卡顿，不缩短"解码 + 切分 + 逐章写盘"的总时长，原验收目标 3 秒未保证。
+- **左右模式大跨度跳转**：目录跳到几十章外会重建窗口，期间显示遮挡（1–2 帧到数百 ms，取决于读盘），这与"手滑跨章零遮挡"是两套路径。
+- **百分比精度**：按章等权，章长差异大时与真实阅读进度有偏差。
+- **竖排图片书的当前章判定**：仍按首个可见块，未同步为"视口中心"（文本已改）。
+- **切章防抖**：随边缘手势一起移除，仅保留"加载中禁用"和目录/设置打开时 `disableSwipe`。
+
+## 14. 后续优化建议
+
+按收益/风险排序：
+
+**P0 · 正确性**
+
+1. 竖排图片书也改为视口中心判定，与文本书对齐。
+2. 左右模式跨窗口跳转的遮挡时长可观测化：`openChapter` 开始与 `onReady` 各打一条带耗时的 hilog，定位慢书场景。
+3. 为 `PagedSource` / `ReaderBlockSource` 的增量通知补一条自检：`onDataAdd/onDataDelete` 次数与数组长度变化不一致时打 error 日志（提前暴露索引错位）。
+
+**P1 · 性能**
+
+4. 导入改为流式：`readUriBytes` 一次性读全文件，10MB 峰值内存 ≈ 20MB（bytes + string）。可按 1MB 分块解码 + 增量切分。
+5. 分页测量缓存字符宽度表，替代每页二分（当前每页 10+ 次 `measureTextSize`）。
+6. `chapterTextCache` 按字节预算而非章数淘汰，长章书可避免 12×40 万字符的极端占用。
+7. 补章做优先级队列：用户滚动方向优先，避免前后同时读盘争 IO。
+
+**P2 · 体验**
+
+8. 百分比改为按字符数加权（`sum(charCount[0..i]) + 章内偏移 / totalChars`），更贴近真实进度。
+9. 目录加快捷定位（当前章自动滚到可视区），长书 1472 章时体验明显。
+10. 左右模式支持"章首/章末"直达按钮，减少大跨度跳转频次。
+11. 竖排滚动条或进度指示器（当前只有页脚百分比）。
+
+**P3 · 工程化**
+
+12. `hilog` 统一 domain/tag 表，便于 `hdc hilog` 过滤（当前 `0x0002/0x0004/0x0006` 混用）。
+13. 抽出 `ReaderEngine` 层：把"窗口维护 + 补偿"从 ArkUI 组件里剥离为纯 TS 类，可单测。
+14. 补 `testdata/` 下的解析与分页用例（已有 `testdata/*.txt`），覆盖空章、单章、超长章、GBK。
