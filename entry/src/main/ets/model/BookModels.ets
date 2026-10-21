@@ -25,7 +25,7 @@ export class BookMeta {
   type: BookType = BookType.TEXT;
   coverFile: string = '';
   chapterCount: number = 0;
-  readingMode: ReadingMode = ReadingMode.VERTICAL;
+  // 阅读方向不再按书保存，统一存在 ReaderSettings.textReadingMode / imageReadingMode
   progress: ReadingProgress = new ReadingProgress();
   createdAt: number = 0;
   updatedAt: number = 0;
@@ -111,6 +111,9 @@ export class ReaderSettings {
   fontSize: number = 18;
   lineHeightRatio: number = 1.7;
   theme: ReadingTheme = ReadingTheme.EYE;
+  // 阅读方向按书类型统一：所有 TXT 共用一套，所有图片书共用另一套，两者互不影响
+  textReadingMode: ReadingMode = ReadingMode.VERTICAL;
+  imageReadingMode: ReadingMode = ReadingMode.VERTICAL;
 }
 
 export class ReaderParams {

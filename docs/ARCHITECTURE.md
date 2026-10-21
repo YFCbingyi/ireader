@@ -92,7 +92,6 @@ class BookManifest { version: number; chapters: ChapterMeta[]; }
 
 class BookMeta {
   id; title; type: BookType; coverFile; chapterCount;
-  readingMode: ReadingMode;
   progress: ReadingProgress;
   createdAt; updatedAt;
 }
@@ -106,7 +105,11 @@ class ReadingProgress {
   updatedAt: number;
 }
 
-class ReaderSettings { fontSize = 18; lineHeightRatio = 1.7; theme = EYE; }
+class ReaderSettings {
+  fontSize = 18; lineHeightRatio = 1.7; theme = EYE;
+  textReadingMode = VERTICAL;   // 所有 TXT 共用的阅读方向
+  imageReadingMode = VERTICAL;  // 所有图片书共用的阅读方向（与 TXT 互不影响）
+}
 
 class Bookmark {
   id; bookId; chapterIndex; chapterTitle;
@@ -121,7 +124,7 @@ class Bookmark {
 ```
 filesDir/
 ├── library.json                 # BookMeta[]（书架，按 updatedAt 倒序）
-├── settings.json                # ReaderSettings（全局字号/行距/主题）
+├── settings.json                # ReaderSettings（全局字号/行距/主题/两类书的阅读方向）
 ├── reading_stats.json           # 阅读时长
 ├── bookmarks/{bookId}.json      # Bookmark[]
 └── books/{bookId}/
@@ -177,7 +180,7 @@ aboutToAppear
 | `loadVersion` | 触发子组件重新加载（左右模式重分页） |
 | `turnMaskVisible` | 纯色遮挡，只在按钮/目录/书签触发的 `openChapter` 出现 |
 | `chapterTextCache / cacheKeys` | 章节全文 LRU：最多 12 章、单章 ≤ 40 万字符 |
-| `readingMode` | 来自 `book.readingMode`（**每本书独立**） |
+| `readingMode` | **按书类型统一**：TXT 读 `settings.textReadingMode`，图片书读 `settings.imageReadingMode`（见 7.1） |
 
 关键流程：
 
@@ -187,7 +190,7 @@ aboutToAppear
 - **上一章落点 = 上一章末尾**（`charOffset = charCount`，图片书 = 最后一张）；**下一章 / 目录落点 = 章首**。
 - **进度保存**：`onTextProgress` / `onImageProgress` 写入 `progress*` 字段 → `scheduleSave()`（800ms 防抖）→ `flushProgress()`；`onPageHide` / `aboutToDisappear` / `onBackPress` / 切章 / 切模式立刻 flush。
 - **百分比**：`computePercent() = (chapterIndex + 章内比例) / chapterCount`，**按章等权**，不依赖总页数（左右模式懒分页因此无需全书页数）。
-- **模式切换**：`changeMode()` 写 `book.readingMode` 后以当前锚点重新 `openChapter`，目标模式自行定位。
+- **模式切换（方向按书类型统一）**：`changeMode(mode)` 不写 `BookMeta`，而是按 `book.type` 写入 `settings.textReadingMode` 或 `settings.imageReadingMode`，`saveSettings` 后以当前锚点重新 `openChapter`。同类型其它书下次打开即沿用新方向，另一类型不受影响。旧版本把方向存在 `BookMeta.readingMode`，该字段已移除；旧 `settings.json` 缺字段时由 `LibraryStore.getSettings()` 补 `VERTICAL`。
 - **字号/行距/主题**：`changeFontSize`（钳制 14–30）/ `changeLineHeight` / `changeTheme` → `LibraryStore.saveSettings`。
 
 ## 8. 文本书渲染（`components/reader/TextReaderView.ets`）

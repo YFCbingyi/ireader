@@ -110,7 +110,10 @@ struct Reader {
     this.applyTheme();
     this.fontSize = this.settings.fontSize;
     this.lineHeightRatio = this.settings.lineHeightRatio;
-    this.readingMode = this.book.readingMode;
+    // 方向按书类型统一：TXT 与图片书各用一套全局配置
+    this.readingMode = this.book.type === BookType.TEXT
+      ? this.settings.textReadingMode
+      : this.settings.imageReadingMode;
     this.manifest = LibraryStore.getManifest(this.bookId);
     this.bookmarks = LibraryStore.getBookmarks(this.bookId);
     if (this.manifest.chapters.length === 0) {
@@ -666,12 +669,19 @@ struct Reader {
     this.updateBookmarkState();
   }
 
+  /**
+   * 切换阅读方向。配置按书类型统一：同类型的所有书共用一套方向，另一类型不受影响。
+   * 当前这本书立即生效，其余同类书在下次打开时生效。
+   */
   private changeMode(mode: ReadingMode): void {
     const previous = this.readingMode;
     this.readingMode = mode;
-    this.book.readingMode = mode;
-    this.book.updatedAt = Date.now();
-    LibraryStore.saveBook(this.book);
+    if (this.book.type === BookType.TEXT) {
+      this.settings.textReadingMode = mode;
+    } else {
+      this.settings.imageReadingMode = mode;
+    }
+    LibraryStore.saveSettings(this.settings);
     if (previous !== mode) {
       // 用当前进度章重新打开，保证两种模式切换后定位一致
       this.openChapter(this.progressChapter, this.progressCharOffset, 0, this.progressRatio, false);

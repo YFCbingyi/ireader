@@ -1,4 +1,11 @@
-import { BookMeta, Bookmark, BookManifest, ReaderSettings, ReadingProgress } from '../model/BookModels';
+import {
+  BookMeta,
+  Bookmark,
+  BookManifest,
+  ReaderSettings,
+  ReadingMode,
+  ReadingProgress
+} from '../model/BookModels';
 import { ReadingTheme } from '../model/ReaderTheme';
 import { AppPaths } from '../utils/AppPaths';
 import { FileUtil } from '../utils/FileUtil';
@@ -165,6 +172,13 @@ export class LibraryStore {
       }
       if (parsed.theme === undefined) {
         parsed.theme = ReadingTheme.EYE;
+      }
+      // 旧版本的 settings.json 没有方向字段，补默认值（方向已从"每本书"改为"按书类型统一"）
+      if (parsed.textReadingMode === undefined) {
+        parsed.textReadingMode = ReadingMode.VERTICAL;
+      }
+      if (parsed.imageReadingMode === undefined) {
+        parsed.imageReadingMode = ReadingMode.VERTICAL;
       }
       return parsed;
     } catch (e) {
