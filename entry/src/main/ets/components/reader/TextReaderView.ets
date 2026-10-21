@@ -691,25 +691,47 @@ export struct TextReaderView {
     return blocks;
   }
 
-  /** 在块列表里找到「某章、某偏移」所在的块索引 */
+  /**
+   * 在块列表里找到「某章、某偏移」所在的块索引。
+   *
+   * 注意：不能一遇到标题块就返回。标题块的 start/end 都是 0，若在此直接 return，
+   * 任何一次锚点补偿（前插 / 头部回收 / 打开书恢复进度）都会落到该章标题，
+   * 表现为"滚到章末又跳回章首"。
+   *
+   * - offset <= 0 视为章首，返回标题块（无标题则返回该章第一块正文）
+   * - offset > 0 返回最后一个 start <= offset 的正文块（偏移超过章末时即最后一块，
+   *   "上一章"按钮定位到章末依赖这一点）
+   */
   private findBlockIndex(chapter: number, offset: number): number {
     const blocks = this.blockSource.snapshot();
+    let titleIndex = -1;
+    let firstTextIndex = -1;
+    let matchedTextIndex = -1;
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       if (block.chapterIndex !== chapter) {
         continue;
       }
       if (block.kind === 'title') {
-        return i;
+        if (titleIndex < 0) {
+          titleIndex = i;
+        }
+        continue;
       }
-      if (offset <= 0) {
-        return i;
+      if (firstTextIndex < 0) {
+        firstTextIndex = i;
       }
-      if (block.start <= offset && offset < block.end) {
-        return i;
+      if (block.start <= offset) {
+        matchedTextIndex = i;
       }
     }
-    return -1;
+    if (offset <= 0) {
+      return titleIndex >= 0 ? titleIndex : firstTextIndex;
+    }
+    if (matchedTextIndex >= 0) {
+      return matchedTextIndex;
+    }
+    return titleIndex >= 0 ? titleIndex : firstTextIndex;
   }
 
   /** 请求加载某一章（追加或前插），带去重与序号校验 */
@@ -760,6 +782,10 @@ export struct TextReaderView {
     this.chapterBlockCounts.set(chapter, blocks.length);
     this.blockSource.prepend(blocks);
     this.windowStart = chapter;
+    // 前插把内容整体下移，必须立即补偿，否则会先闪一帧下移后的画面
+    setTimeout(() => {
+      this.applyAnchorCompensation();
+    }, 0);
     hilog.debug(DOMAIN, TAG, 'prepend chapter %{public}d blocks=%{public}d', chapter, blocks.length);
   }
 
@@ -806,7 +832,7 @@ export struct TextReaderView {
       this.blockSource.removeTail(count);
       this.windowEnd--;
     } else {
-      // 回收头部：先记录锚点再补偿
+      // 回收头部：先记录锚点，删除后立即补偿，避免中间渲染一帧错位内容
       this.captureAnchor();
       const headCount = this.chapterBlockCounts.get(this.windowStart);
       const count = headCount !== undefined ? headCount : 0;
@@ -814,6 +840,9 @@ export struct TextReaderView {
       this.chapterBlockCounts.delete(this.windowStart);
       this.blockSource.removeHead(count);
       this.windowStart++;
+      setTimeout(() => {
+        this.applyAnchorCompensation();
+      }, 0);
     }
   }
 
@@ -864,6 +893,27 @@ export struct TextReaderView {
     }
   }
 
+  /**
+   * 按已记录的锚点做无动画重定位。
+   * 前插 / 头部回收都会让既有块索引整体位移，必须立即回到原锚点，
+   * 否则会先渲染一帧错位内容再被 onScrollIndex 纠正。
+   */
+  private applyAnchorCompensation(): void {
+    if (this.anchorChapter < 0) {
+      return;
+    }
+    const index = this.findBlockIndex(this.anchorChapter, this.anchorOffset);
+    this.anchorChapter = -1;
+    if (index < 0) {
+      return;
+    }
+    this.firstVisibleIndex = index;
+    this.lastVisibleStart = index;
+    this.lastVisibleEnd = index;
+    this.verticalScroller.scrollToIndex(index, false, ScrollAlign.START);
+    this.updateProgressFromBlocks(index);
+  }
+
   /** 消费待定定位：滚到目标块并更新进度（onScrollIndex 与 initWindow 的下一帧补偿共用） */
   private consumePendingScroll(): void {
     if (this.pendingScrollIndex < 0) {
@@ -893,14 +943,8 @@ export struct TextReaderView {
       return;
     }
     if (this.anchorChapter >= 0) {
-      const index = this.findBlockIndex(this.anchorChapter, this.anchorOffset);
-      this.anchorChapter = -1;
-      if (index >= 0) {
-        this.firstVisibleIndex = index;
-        this.verticalScroller.scrollToIndex(index, false, ScrollAlign.START);
-        this.updateProgressFromBlocks(index);
-        return;
-      }
+      this.applyAnchorCompensation();
+      return;
     }
     this.updateProgressFromCenter(start, end);
     this.maybeLoadMore(start, end);
