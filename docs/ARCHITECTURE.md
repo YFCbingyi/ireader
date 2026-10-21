@@ -288,6 +288,7 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 9. **taskpool 任务内禁用 `AppPaths` / `Context`**：所有路径由主线程算好，以纯字符串传入。
 10. **竖排顶部无固定章名**：章名只作为正文流中的一块出现，不要再加回 header。
 11. **点击分区只在文本书**：`TextReaderView.handleTap` 是唯一入口，图片书（`ImageReaderView`）点击仍然只唤起控制栏，不要顺手同步过去——图片书左右是整图全屏，误触翻页影响更大。
+12. **`findBlockIndex` 必须按偏移匹配，绝不能"遇到标题块就返回"**：标题块 `start/end` 都是 0，无条件返回会让所有锚点补偿（前插、头部回收、打开书恢复进度）都落回章首，表现为"读到章末又跳回章首"。正确语义是 `offset <= 0` 才返回标题块，否则返回最后一个 `start <= offset` 的正文块（`offset` 超过章末时即最后一块，"上一章"定位到章末依赖这一点）。`ImageReaderView` 的同名方法同理。
 
 ## 12. 性能与内存模型
 

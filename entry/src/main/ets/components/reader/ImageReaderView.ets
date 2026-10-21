@@ -559,21 +559,40 @@ export struct ImageReaderView {
     return blocks;
   }
 
+  /**
+   * 找到「某章、第 imageIndex 张」对应的块索引。
+   *
+   * 注意：不能一遇到标题块就返回，否则前插 / 头部回收 / 恢复进度时都会落到章首。
+   * imageIndex <= 0 才视为章首（返回标题块）；超出本章图片数时落到最后一张。
+   */
   private findBlockIndex(chapter: number, imageIndex: number): number {
     const blocks = this.blockSource.snapshot();
+    let titleIndex = -1;
+    let firstImageIndex = -1;
+    let lastImageIndex = -1;
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       if (block.chapterIndex !== chapter) {
         continue;
       }
       if (block.kind === 'title') {
-        return i;
+        if (titleIndex < 0) {
+          titleIndex = i;
+        }
+        continue;
       }
+      if (firstImageIndex < 0) {
+        firstImageIndex = i;
+      }
+      lastImageIndex = i;
       if (block.imageIndex >= imageIndex) {
         return i;
       }
     }
-    return -1;
+    if (imageIndex > 0 && lastImageIndex >= 0) {
+      return lastImageIndex;
+    }
+    return titleIndex >= 0 ? titleIndex : firstImageIndex;
   }
 
   private rebuildBlockHeights(): void {
