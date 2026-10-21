@@ -232,6 +232,7 @@ flowchart TD
 - **当前章判定**：进度、目录高亮、页脚章号都取 `floor((start+end)/2)` 的中心块所属章；`firstVisibleIndex` 只用于定位与补偿。
 - **跳转**：父组件 `jumpVersion++` → `onJump()` → 延迟一帧 `initWindow(jumpChapter, jumpOffset)` → 重建窗口 + `pendingScrollIndex` 定位 → `signalReady()` → 父组件揭开遮挡。
 - **进度上报**：`updateProgressFromBlocks` 内部 400ms 节流后 `onProgress(chapter, offset, ratio)`。
+- **点击分区**（`handleTap`）：上侧 30% 上翻一屏、下侧 30% 下翻一屏（`scrollScreen` → `animateTo` + `scrollBy(0, ±可视高 × 0.9)`），中间 40% 唤起控制栏。翻屏跨章时自然滚过章标题，不触发窗口重建。
 
 ### 8.2 左右：跨章页窗口
 
@@ -258,6 +259,7 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 - **误报抑制**：任何结构变更（reset / prepend / 头部回收）前调 `beginPageSync()`，48ms 内 `handlePageChange` 只同步索引、不上报进度、不触发窗口维护。这是"翻一页跳两页"的唯一防线。
 - **每章第 0 页**顶部渲染该章标题（分页时用 `firstPageExtraHeight` 扣掉标题高度），页眉常驻当前页所属章名。
 - **页脚**：`第 x/y 章 · z%`，不含页号。
+- **点击分区**（`handleTap`）：左侧 30% 上一页、右侧 30% 下一页（`turnPage`），中间 40% 唤起控制栏。翻页到达窗口端部时先 `await` 补章，再延迟 60ms 越过 `beginPageSync` 锁执行 `changeIndex(..., true)`。
 
 ## 9. 图片书渲染（`components/reader/ImageReaderView.ets`）
 
@@ -285,6 +287,7 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 8. **`TextPaginator` 的 `firstPageExtraHeight` 必须与真实渲染的标题高度一致**，否则每章末页会溢出或留白。
 9. **taskpool 任务内禁用 `AppPaths` / `Context`**：所有路径由主线程算好，以纯字符串传入。
 10. **竖排顶部无固定章名**：章名只作为正文流中的一块出现，不要再加回 header。
+11. **点击分区只在文本书**：`TextReaderView.handleTap` 是唯一入口，图片书（`ImageReaderView`）点击仍然只唤起控制栏，不要顺手同步过去——图片书左右是整图全屏，误触翻页影响更大。
 
 ## 12. 性能与内存模型
 

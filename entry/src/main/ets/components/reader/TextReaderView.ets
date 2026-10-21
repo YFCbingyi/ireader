@@ -23,6 +23,11 @@ const PAGE_CACHE_LIMIT = 6;
 const PAGE_WINDOW_RADIUS = 1;
 const PAGE_WINDOW_MAX_CHAPTERS = 5;
 const PAGE_LOAD_AHEAD = 2;
+// 点击分区：两侧 30% 翻页（左右模式翻页 / 上下模式翻屏），中间 40% 唤起控制栏
+const TAP_SIDE_RATIO = 0.3;
+// 上下模式点击翻屏只滚可视高度的 90%，保留少量重叠便于衔接上下文
+const TAP_SCROLL_RATIO = 0.9;
+const TAP_SCROLL_DURATION = 240;
 // 连续卷轴：初始窗口前后各 2 章；窗口常驻章数上限；距端部不足若干块时预加载相邻章
 const WINDOW_RADIUS = 2;
 const WINDOW_MAX_CHAPTERS = 8;
@@ -1202,6 +1207,98 @@ export struct TextReaderView {
     this.onProgress(this.currentChapter, this.currentCharOffset, this.currentRatio);
   }
 
+  // ================= 点击分区：两侧翻页 / 中间唤起控制栏 =================
+
+  /**
+   * 根容器单击：按当前模式分区。
+   * - 左右模式：左侧 30% 上一页，右侧 30% 下一页，中间唤起控制栏。
+   * - 上下模式：上侧 30% 上翻一屏，下侧 30% 下翻一屏，中间唤起控制栏。
+   */
+  private handleTap(event: ClickEvent): void {
+    if (this.controlsVisible) {
+      this.onTap();
+      return;
+    }
+    if (this.mode === ReadingMode.HORIZONTAL) {
+      const width = this.lastWidth > 0 ? this.lastWidth : 1;
+      const ratio = event.x / width;
+      if (ratio < TAP_SIDE_RATIO) {
+        this.turnPage(-1);
+        return;
+      }
+      if (ratio > 1 - TAP_SIDE_RATIO) {
+        this.turnPage(1);
+        return;
+      }
+      this.onTap();
+      return;
+    }
+    const height = this.lastHeight > 0 ? this.lastHeight : 1;
+    const ratio = event.y / height;
+    if (ratio < TAP_SIDE_RATIO) {
+      this.scrollScreen(-1);
+      return;
+    }
+    if (ratio > 1 - TAP_SIDE_RATIO) {
+      this.scrollScreen(1);
+      return;
+    }
+    this.onTap();
+  }
+
+  /**
+   * 左右模式点击翻页。已在窗口端部时先补相邻章，补完后等补偿锁释放再翻，
+   * 否则本次翻页会被 beginPageSync 的 48ms 锁吞掉。
+   */
+  private async turnPage(delta: number): Promise<void> {
+    const total = this.pageSource.totalCount();
+    if (total === 0) {
+      return;
+    }
+    let target = this.currentPage + delta;
+    let needSync = false;
+    if (target < 0) {
+      if (this.pageWindowStart <= 0) {
+        return;
+      }
+      await this.prependPrevChapter(this.pageWindowStart - 1);
+      target = this.currentPage - 1;
+      needSync = true;
+    } else if (target >= total) {
+      if (this.pageWindowEnd >= this.chapterCount - 1) {
+        return;
+      }
+      await this.appendNextChapter(this.pageWindowEnd + 1);
+      target = this.currentPage + 1;
+      needSync = true;
+    }
+    const max = this.pageSource.totalCount();
+    if (target < 0 || target >= max) {
+      return;
+    }
+    if (needSync) {
+      setTimeout(() => {
+        this.swiperController.changeIndex(target, true);
+      }, 60);
+      return;
+    }
+    this.swiperController.changeIndex(target, true);
+  }
+
+  /** 上下模式点击翻屏：按可视高度滚动一屏，跨章自然滚过章标题 */
+  private scrollScreen(direction: number): void {
+    if (this.lastHeight <= 0) {
+      return;
+    }
+    const delta = this.lastHeight * TAP_SCROLL_RATIO * direction;
+    this.getUIContext().animateTo({
+      duration: TAP_SCROLL_DURATION,
+      curve: Curve.EaseOut
+    }, () => {
+      this.verticalScroller.scrollBy(0, delta);
+    });
+  }
+
   @Builder
   header() {
     Row() {
@@ -1359,8 +1456,8 @@ export struct TextReaderView {
         }
       }
     })
-    .onClick(() => {
-      this.onTap();
+    .onClick((event: ClickEvent) => {
+      this.handleTap(event);
     })
   }
 }
