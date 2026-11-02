@@ -14,6 +14,7 @@ import {
   ReaderSettings,
   ReadingMode,
   ReadingProgress,
+  SearchHit,
   TextAlignMode,
   pageTurnLabel,
   textAlignLabel
@@ -36,6 +37,11 @@ const DOMAIN = 0x0006;
 const TAG = 'Reader';
 // 空标注列表：避免每次渲染都新建数组
 const EMPTY_ANNOTATIONS: Annotation[] = [];
+// 全文搜索：结果上限、片段前后各取多少字、进度文案刷新间隔（ms）、历史条数上限
+const SEARCH_MAX_HITS = 200;
+const SEARCH_SNIPPET_CHARS = 28;
+const SEARCH_PROGRESS_INTERVAL = 150;
+const SEARCH_HISTORY_LIMIT = 10;
 
 @Entry
 @Component
@@ -76,6 +82,17 @@ struct Reader {
   @State bookmarked: boolean = false;
   @State theme: ReadingTheme = ReadingTheme.EYE;
   @State palette: ReaderThemeColors = ReaderTheme.eye();
+  // 顶部设置按钮的下拉菜单：阅读设置 / 添加书签 / 全文搜索
+  @State menuVisible: boolean = false;
+  // 阅读设置：页脚左侧时间电量
+  @State showFooterTime: boolean = true;
+  // 全文搜索：关键字、进行中状态与进度、结果、逐书历史
+  @State searchKeyword: string = '';
+  @State searchRunning: boolean = false;
+  @State searchProgress: string = '';
+  @State searchResults: SearchHit[] = [];
+  @State searchHistory: string[] = [];
+  private searchSeq: number = 0;
   // 划线 / 想法
   @State annotations: Annotation[] = [];
   @State annotationsVersion: number = 0;
@@ -139,6 +156,7 @@ struct Reader {
     this.lineHeightRatio = this.settings.lineHeightRatio;
     this.fontFamily = this.settings.fontFamily;
     this.textAlignMode = this.settings.textAlignMode;
+    this.showFooterTime = this.settings.showFooterTime;
     // 翻页方式按书类型统一：TXT 与图片书各用一套全局配置
     this.pageTurn = this.book.type === BookType.TEXT
       ? this.settings.textPageTurn
@@ -148,6 +166,7 @@ struct Reader {
     this.loadFontList();
     this.manifest = LibraryStore.getManifest(this.bookId);
     this.bookmarks = LibraryStore.getBookmarks(this.bookId);
+    this.searchHistory = LibraryStore.getSearchHistory(this.bookId);
     this.annotations = AnnotationStore.load(this.bookId);
     this.rebuildAnnotationIndex();
     if (this.manifest.chapters.length === 0) {
@@ -175,6 +194,7 @@ struct Reader {
   }
 
   onPageHide(): void {
+    this.menuVisible = false;
     this.stopReadingSession();
     this.flushProgress();
     this.exitImmersive();
@@ -216,6 +236,10 @@ struct Reader {
   }
 
   onBackPress(): boolean {
+    if (this.menuVisible) {
+      this.menuVisible = false;
+      return true;
+    }
     if (this.dictVisible) {
       this.dictVisible = false;
       return true;
@@ -226,6 +250,9 @@ struct Reader {
     }
     if (this.panel.length > 0) {
       this.panel = '';
+      if (this.searchRunning) {
+        this.cancelSearch();
+      }
       return true;
     }
     this.stopReadingSession();
@@ -876,14 +903,6 @@ struct Reader {
   }
 
   /**
-   * 切换阅读方向（设置面板的「上下 / 左右」入口）。
-   * 配置按书类型统一：同类型的所有书共用一套方向，另一类型不受影响。
-   */
-  private changeMode(mode: ReadingMode): void {
-    this.changePageTurn(mode === ReadingMode.VERTICAL ? PageTurnMode.VERTICAL : PageTurnMode.SLIDE);
-  }
-
-  /**
    * 切换翻页方式：仿真 / 横滑 / 上下滑动 / 无动效。
    * 只有「上下 ↔ 左右」真正变化时才重开章节，横向三种方式只换动效。
    */
@@ -913,6 +932,154 @@ struct Reader {
     this.textAlignMode = mode;
     this.settings.textAlignMode = mode;
     LibraryStore.saveSettings(this.settings);
+  }
+
+  /** 页脚左侧时间与电量：关掉后页脚只留右侧章节进度 */
+  private changeShowFooterTime(value: boolean): void {
+    this.showFooterTime = value;
+    this.settings.showFooterTime = value;
+    LibraryStore.saveSettings(this.settings);
+  }
+
+  /** 面板 / 菜单配色：图片书正文是黑底，用深色面板，其余跟随阅读主题 */
+  private panelColors(): ReaderThemeColors {
+    return this.book.type === BookType.IMAGE ? ReaderTheme.dark() : this.palette;
+  }
+
+  // ================= 顶部设置菜单 =================
+
+  /** 打开菜单前刷新书签状态，菜单项文案才能显示「添加书签 / 取消书签」 */
+  private toggleMenu(): void {
+    if (this.menuVisible) {
+      this.menuVisible = false;
+      return;
+    }
+    this.updateBookmarkState();
+    this.menuVisible = true;
+  }
+
+  private openMenuPanel(name: string): void {
+    this.menuVisible = false;
+    this.panel = name;
+  }
+
+  // ================= 全文搜索 =================
+
+  private startSearch(keyword: string): void {
+    const query = keyword.trim();
+    if (query.length === 0) {
+      return;
+    }
+    this.searchKeyword = query;
+    this.rememberSearchKeyword(query);
+    this.searchSeq++;
+    const seq = this.searchSeq;
+    this.searchResults = [];
+    this.searchProgress = '';
+    this.searchRunning = true;
+    this.runSearch(query, seq);
+  }
+
+  /**
+   * 逐章扫全文：每章一次异步读盘（命中章节缓存则直接复用）。
+   * 进度文案按时间节流刷新，避免每章都触发一次整页重建。
+   */
+  private async runSearch(keyword: string, seq: number): Promise<void> {
+    const total = this.manifest.chapters.length;
+    const hits: SearchHit[] = [];
+    let lastTick = 0;
+    for (let i = 0; i < total; i++) {
+      if (seq !== this.searchSeq) {
+        return;
+      }
+      const text = await this.loadChapterTextAsync(i);
+      if (seq !== this.searchSeq) {
+        return;
+      }
+      this.collectHits(hits, i, keyword, text);
+      const now = Date.now();
+      if (now - lastTick > SEARCH_PROGRESS_INTERVAL) {
+        lastTick = now;
+        this.searchProgress = `${i + 1}/${total}章`;
+      }
+      if (hits.length >= SEARCH_MAX_HITS) {
+        break;
+      }
+    }
+    if (seq !== this.searchSeq) {
+      return;
+    }
+    this.searchResults = hits;
+    this.searchProgress = '';
+    this.searchRunning = false;
+    hilog.info(DOMAIN, TAG, 'search "%{public}s" hits=%{public}d chapters=%{public}d',
+      keyword, hits.length, total);
+  }
+
+  /** 单章收集命中：截取关键字前后文片段，换行压成空格，两端补省略号 */
+  private collectHits(hits: SearchHit[], chapter: number, keyword: string, text: string): void {
+    if (text.length === 0 || keyword.length === 0) {
+      return;
+    }
+    const title = this.chapterTitleOf(chapter);
+    const keyLength = keyword.length;
+    let from = 0;
+    while (hits.length < SEARCH_MAX_HITS) {
+      const index = text.indexOf(keyword, from);
+      if (index < 0) {
+        return;
+      }
+      const beforeStart = index > SEARCH_SNIPPET_CHARS ? index - SEARCH_SNIPPET_CHARS : 0;
+      const afterEnd = index + keyLength + SEARCH_SNIPPET_CHARS < text.length
+        ? index + keyLength + SEARCH_SNIPPET_CHARS : text.length;
+      let before = Reader.collapseSpace(text.substring(beforeStart, index));
+      let after = Reader.collapseSpace(text.substring(index + keyLength, afterEnd));
+      if (beforeStart > 0) {
+        before = `…${before}`;
+      }
+      if (afterEnd < text.length) {
+        after = `${after}…`;
+      }
+      hits.push(SearchHit.of(chapter, index, title, before, text.substring(index, index + keyLength), after));
+      from = index + keyLength;
+    }
+  }
+
+  private static collapseSpace(raw: string): string {
+    return raw.split(new RegExp('\\s+')).join(' ');
+  }
+
+  /** 历史去重后置顶，最多 SEARCH_HISTORY_LIMIT 条 */
+  private rememberSearchKeyword(keyword: string): void {
+    const next: string[] = [];
+    next.push(keyword);
+    for (let i = 0; i < this.searchHistory.length; i++) {
+      const item = this.searchHistory[i];
+      if (item !== keyword && next.length < SEARCH_HISTORY_LIMIT) {
+        next.push(item);
+      }
+    }
+    this.searchHistory = next;
+    LibraryStore.saveSearchHistory(this.bookId, next);
+  }
+
+  private clearSearchHistory(): void {
+    this.searchHistory = [];
+    LibraryStore.saveSearchHistory(this.bookId, []);
+  }
+
+  /** 取消进行中的搜索：序号自增让在途循环退出，并清掉半成品结果（下次打开回到历史） */
+  private cancelSearch(): void {
+    this.searchSeq++;
+    this.searchRunning = false;
+    this.searchProgress = '';
+    this.searchResults = [];
+    this.searchKeyword = '';
+  }
+
+  private jumpToSearchHit(hit: SearchHit): void {
+    this.panel = '';
+    this.openChapter(hit.chapterIndex, hit.charOffset, 0, 0, true);
   }
 
   private loadFontList(): void {
@@ -1020,7 +1187,7 @@ struct Reader {
       }
       .margin({ right: 10 })
       this.barIcon($r('sys.symbol.more'), (): void => {
-        this.openPanel('settings');
+        this.toggleMenu();
       }, 40)
     }
     .width('100%')
@@ -1029,6 +1196,69 @@ struct Reader {
     .alignItems(VerticalAlign.Center)
     .onClick(() => {
     })
+  }
+
+  /** 菜单项：整行可点，文案左对齐 */
+  @Builder
+  menuItem(label: string, action: () => void) {
+    Text(label)
+      .width('100%')
+      .height(48)
+      .fontSize(15)
+      .fontColor(this.panelColors().panelText)
+      .textAlign(TextAlign.Start)
+      .padding({ left: 18, right: 18 })
+      .onClick(() => {
+        action();
+      })
+  }
+
+  @Builder
+  menuDivider() {
+    Divider()
+      .color(this.panelColors().divider)
+      .margin({ left: 18, right: 18 })
+  }
+
+  /** 设置按钮的下拉菜单：阅读设置 / 添加书签 / 全文搜索（图片书没有全文搜索） */
+  @Builder
+  readerMenu() {
+    Stack({ alignContent: Alignment.TopEnd }) {
+      // 点空白处只收起菜单，不翻页也不关控制栏；让开顶部栏，菜单开着时按钮仍可点
+      Column()
+        .width('100%')
+        .height('100%')
+        .margin({ top: 76 })
+        .onClick(() => {
+          this.menuVisible = false;
+        })
+
+      Column() {
+        this.menuItem('阅读设置', (): void => {
+          this.openMenuPanel('settings');
+        })
+        this.menuDivider()
+        this.menuItem(this.bookmarked ? '取消书签' : '添加书签', (): void => {
+          this.menuVisible = false;
+          this.toggleBookmark();
+        })
+        if (this.book.type === BookType.TEXT) {
+          this.menuDivider()
+          this.menuItem('全文搜索', (): void => {
+            this.openMenuPanel('search');
+          })
+        }
+      }
+      .width(172)
+      .backgroundColor(this.panelColors().panelBg)
+      .borderRadius(14)
+      .border({ width: 1, color: this.panelColors().divider })
+      .shadow({ radius: 20, color: '#33000000', offsetX: 0, offsetY: 6 })
+      .padding({ top: 4, bottom: 4 })
+      .margin({ top: 82, right: 28 })
+    }
+    .width('100%')
+    .height('100%')
   }
 
   @Builder
@@ -1055,6 +1285,7 @@ struct Reader {
   private toggleControls(): void {
     if (this.controlsVisible) {
       this.controlsVisible = false;
+      this.menuVisible = false;
       return;
     }
     this.updateProgressLabel();
@@ -1063,6 +1294,7 @@ struct Reader {
   }
 
   private openPanel(name: string): void {
+    this.menuVisible = false;
     if (this.panel === name) {
       this.panel = '';
     } else {
@@ -1315,6 +1547,7 @@ struct Reader {
           dividerColor: this.palette.divider,
           accentColor: this.palette.accent,
           accentTextColor: this.palette.accentText,
+          showFooterTime: this.showFooterTime,
           controlsVisible: this.controlsVisible,
           annotationsVersion: this.annotationsVersion,
           annotationBg: this.palette.annotationBg,
@@ -1421,6 +1654,11 @@ struct Reader {
         .padding({ left: 16, right: 16, bottom: 22 })
       }
 
+      // 设置按钮的下拉菜单：盖在控制栏之上，点空白处或再点按钮收起
+      if (this.menuVisible && this.panel.length === 0 && !this.loading && this.errorText.length === 0) {
+        this.readerMenu()
+      }
+
       if (this.panel.length > 0 && !this.loading && this.errorText.length === 0) {
         ReaderPanels({
           panel: this.panel,
@@ -1431,7 +1669,6 @@ struct Reader {
           bookmarks: this.bookmarks,
           annotations: this.annotations,
           isImageBook: this.book.type === BookType.IMAGE,
-          readingMode: this.readingMode,
           pageTurn: this.pageTurn,
           fontSize: this.fontSize,
           lineHeightRatio: this.lineHeightRatio,
@@ -1440,8 +1677,32 @@ struct Reader {
           textAlignMode: this.textAlignMode,
           theme: this.theme,
           colors: this.book.type === BookType.IMAGE ? ReaderTheme.dark() : this.palette,
+          showFooterTime: this.showFooterTime,
+          searchKeyword: this.searchKeyword,
+          searchRunning: this.searchRunning,
+          searchProgress: this.searchProgress,
+          searchResults: this.searchResults,
+          searchHistory: this.searchHistory,
           onClose: (): void => {
             this.panel = '';
+            if (this.searchRunning) {
+              this.cancelSearch();
+            }
+          },
+          onToggleFooterTime: (value: boolean): void => {
+            this.changeShowFooterTime(value);
+          },
+          onSearch: (keyword: string): void => {
+            this.startSearch(keyword);
+          },
+          onCancelSearch: (): void => {
+            this.cancelSearch();
+          },
+          onSelectSearchHit: (hit: SearchHit): void => {
+            this.jumpToSearchHit(hit);
+          },
+          onClearSearchHistory: (): void => {
+            this.clearSearchHistory();
           },
           onSelectChapter: (index: number): void => {
             this.jumpToChapter(index);
@@ -1458,9 +1719,6 @@ struct Reader {
           onDeleteAnnotation: (annotation: Annotation): void => {
             this.deleteAnnotation(annotation);
           },
-          onModeChange: (mode: ReadingMode): void => {
-            this.changeMode(mode);
-          },
           onFontSizeChange: (size: number): void => {
             this.changeFontSize(size);
           },
@@ -1471,6 +1729,9 @@ struct Reader {
             this.changeTheme(theme);
           },
           onSwitchPanel: (name: string): void => {
+            if (this.searchRunning) {
+              this.cancelSearch();
+            }
             this.panel = name;
           },
           onFontFamilyChange: (family: string): void => {

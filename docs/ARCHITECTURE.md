@@ -39,9 +39,9 @@ ArkTS 硬约束（踩过的坑）：
 ```
 entry/src/main/ets/
 ├── model/
-│   ├── BookModels.ets        # 全部领域模型与枚举（BookType / ReadingMode / ReadingProgress /
-│   │                         #   BookMeta / ChapterMeta / ImageEntry / BookManifest / Bookmark /
-│   │                         #   ReaderSettings / ImportResult / ImportProgressCallback）
+│   ├── BookModels.ets        # 全部领域模型与枚举（BookType / ReadingMode /
+│   │                         #   ReadingProgress / BookMeta / ChapterMeta / ImageEntry / BookManifest /
+│   │                         #   Bookmark / ReaderSettings / SearchHit / ImportResult / ImportProgressCallback）
 │   ├── Annotation.ets        # 划线/想法模型（Annotation）+ 渲染片段切分（SegmentBuilder）
 │   ├── ReaderTheme.ets       # ReadingTheme 枚举 + ReaderThemeColors 三套配色
 │   └── ReadingStats.ets      # 阅读时长统计模型
@@ -63,7 +63,7 @@ entry/src/main/ets/
 │       ├── TextReaderView.ets   # 文本书：竖排块窗口 + 左右页窗口
 │       ├── ImageReaderView.ets  # 图片书：竖排图片块窗口 + 左右图片页窗口
 │       ├── ImageDataSource.ets  # ImagePage + 跨章图片页数据源
-│       └── ReaderPanels.ets     # 目录（书名 + 目录/笔记 tab + 30 章分档）/ 书签 / 设置面板
+│       └── ReaderPanels.ets     # 目录（书名 + 目录/笔记 tab + 30 章分档）/ 书签 / 阅读设置 / 全文搜索
 ├── pages/
 │   ├── Index.ets             # 书架首页 + 导入入口 + 三 Tab
 │   ├── Reader.ets            # 阅读页壳：加载、切章、进度、遮挡、模式切换
@@ -111,6 +111,14 @@ class ReaderSettings {
   fontSize = 18; lineHeightRatio = 1.7; theme = EYE;
   textReadingMode = VERTICAL;   // 所有 TXT 共用的阅读方向
   imageReadingMode = VERTICAL;  // 所有图片书共用的阅读方向（与 TXT 互不影响）
+  fontFamily = ''; textAlignMode = AUTO;
+  showFooterTime = true;        // 页脚左侧时间与电量
+}
+
+class SearchHit {               // 全文搜索命中
+  chapterIndex; charOffset;
+  chapterTitle;
+  before; match; after;         // 前后文片段，match 单独成段用于高亮
 }
 
 class Bookmark {
@@ -129,6 +137,7 @@ filesDir/
 ├── settings.json                # ReaderSettings（全局字号/行距/主题/两类书的阅读方向）
 ├── reading_stats.json           # 阅读时长
 ├── bookmarks/{bookId}.json      # Bookmark[]
+├── search/{bookId}.json         # string[]（全文搜索历史，最新在前，最多 10 条）
 ├── annotations/{bookId}.json    # Annotation[]（划线/想法，按章+章内偏移）
 └── books/{bookId}/
     ├── manifest.json            # BookManifest
@@ -138,7 +147,7 @@ filesDir/
     └── source.zip               # 图片书原始压缩包
 ```
 
-读写入口统一为 `LibraryStore`（`getBooks/getBook/saveBook/getManifest/saveManifest/getSettings/saveSettings/getBookmarks/saveBookmarks`），底层是 `FileUtil.readText/writeTextAtomic`。
+读写入口统一为 `LibraryStore`（`getBooks/getBook/saveBook/getManifest/saveManifest/getSettings/saveSettings/getBookmarks/saveBookmarks/getSearchHistory/saveSearchHistory`），底层是 `FileUtil.readText/writeTextAtomic`。
 
 ## 6. 导入链路
 
@@ -186,6 +195,9 @@ aboutToAppear
 | `annotations / annotationsVersion / annotationIndex` | 划线想法数据、渲染版本号、按章分组的索引 |
 | `noteVisible / noteDraft / noteExistingId` | 想法编辑面板状态（新增还是编辑已有标注） |
 | `readingMode` | **按书类型统一**：TXT 读 `settings.textReadingMode`，图片书读 `settings.imageReadingMode`（见 7.1） |
+| `menuVisible` | 顶部「⋯」设置菜单：阅读设置 / 添加书签 / 全文搜索（图片书无全文搜索） |
+| `showFooterTime` | 页脚左侧时间与电量的显示开关 |
+| `searchKeyword / searchRunning / searchProgress / searchResults / searchHistory / searchSeq` | 全文搜索状态与逐书历史 |
 
 关键流程：
 
@@ -195,8 +207,13 @@ aboutToAppear
 - **上一章落点 = 上一章末尾**（`charOffset = charCount`，图片书 = 最后一张）；**下一章 / 目录落点 = 章首**。
 - **进度保存**：`onTextProgress` / `onImageProgress` 写入 `progress*` 字段 → `scheduleSave()`（800ms 防抖）→ `flushProgress()`；`onPageHide` / `aboutToDisappear` / `onBackPress` / 切章 / 切模式立刻 flush。
 - **百分比**：`computePercent() = (chapterIndex + 章内比例) / chapterCount`，**按章等权**，不依赖总页数（左右模式懒分页因此无需全书页数）。
-- **模式切换（方向按书类型统一）**：`changeMode(mode)` 不写 `BookMeta`，而是按 `book.type` 写入 `settings.textReadingMode` 或 `settings.imageReadingMode`，`saveSettings` 后以当前锚点重新 `openChapter`。同类型其它书下次打开即沿用新方向，另一类型不受影响。旧版本把方向存在 `BookMeta.readingMode`，该字段已移除；旧 `settings.json` 缺字段时由 `LibraryStore.getSettings()` 补 `VERTICAL`。
+- **模式切换（方向按书类型统一）**：`changePageTurn(mode)` 不写 `BookMeta`，而是按 `book.type` 写入 `settings.textPageTurn` 或 `settings.imagePageTurn`（`VERTICAL` 即上下卷轴，其余为左右分页），`saveSettings` 后以当前锚点重新 `openChapter`。同类型其它书下次打开即沿用新方向，另一类型不受影响。旧版本把方向存在 `BookMeta.readingMode`，该字段已移除；旧 `settings.json` 缺字段时由 `LibraryStore.getSettings()` 补 `VERTICAL`。**阅读方向只从底部「翻页」面板切换**，阅读设置抽屉不再重复提供。
 - **字号/行距/主题**：`changeFontSize`（钳制 14–30）/ `changeLineHeight` / `changeTheme` → `LibraryStore.saveSettings`。
+- **设置菜单**：顶栏「⋯」（`toggleMenu`）弹出 `readerMenu`，三项为 **阅读设置 / 添加书签 / 全文搜索**（图片书只有前两项）。菜单盖在控制栏之上，点空白只收起菜单；「添加书签」复用 `toggleBookmark`，已加过书签时文案变成「取消书签」（打开菜单前先 `updateBookmarkState()`）。
+- **阅读设置**：`panel='settings'` 抽屉，只有书签 / 笔记入口、「添加当前页书签」和 `页脚显示时间与电量` 四项：
+  - `页脚显示时间与电量`：`settings.showFooterTime` → `TextReaderView.showFooterTime` → `ReaderFooter.showClock`，关闭后页脚左侧留空、只留右侧 `x/y章`。
+  - **阅读方向 / 背景 / 字号 / 行距不在这个抽屉里配置**，统一走底部控制栏的「翻页 / 背景 / 字体」面板（`pageTurnSheet` / `backgroundSheet` / `fontSheet`），避免两处重复入口。因此抽屉高度按内容收口（`SETTINGS_SHEET_HEIGHT`），书签抽屉仍是 `58%`。
+- **全文搜索**：`startSearch(keyword)` → `runSearch()` 逐章 `loadChapterTextAsync(i)` 扫全文（复用 12 章 LRU，不额外占内存），命中收集为 `SearchHit`（章号 + 章内偏移 + 前后文片段，关键字单独成段供高亮）。进度文案按 150ms 节流刷新，`searchSeq` 自增即可取消在途搜索；结果上限 200 处，关键字去重后写入 `search/{bookId}.json`（最多 10 条）。点击结果 `jumpToSearchHit` → `openChapter(chapterIndex, charOffset)`，落点与进度/书签同一坐标系。
 
 ## 8. 文本书渲染（`components/reader/TextReaderView.ets`）
 
@@ -265,7 +282,7 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 - **回收**：超 5 章时回收离当前章更远的一端，回收头部时 `currentPage -= removed` 并补偿。
 - **误报抑制**：任何结构变更（reset / prepend / 头部回收）前调 `beginPageSync()`，48ms 内 `handlePageChange` 只同步索引、不上报进度、不触发窗口维护。这是"翻一页跳两页"的唯一防线。
 - **每章第 0 页**顶部渲染该章标题（分页时用 `firstPageExtraHeight` 扣掉标题高度），页眉常驻当前页所属章名。
-- **页脚**：`第 x/y 章 · z%`，不含页号。
+- **页脚**：右侧 `x/y章`（无进度时回退 `第 x/y 章 · z%`），不含页号；左侧为时间 + 电量角标，受 `settings.showFooterTime` 控制显隐。
 - **点击分区**（`handleTap`）：左侧 30% 上一页、右侧 30% 下一页（`turnPage`），中间 40% 唤起控制栏。翻页到达窗口端部时先 `await` 补章，再延迟 60ms 越过 `beginPageSync` 锁执行 `changeIndex(..., true)`。
 
 ### 8.3 长按选词：复制 / 划线 / 想法 / 词典
