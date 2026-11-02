@@ -3,7 +3,7 @@ import {
   Bookmark,
   ChapterMeta,
   PageTurnMode,
-  ReadingMode,
+  SearchHit,
   TextAlignMode,
   pageTurnLabel,
   textAlignLabel
@@ -20,6 +20,8 @@ const FONT_MIN: number = 14;
 const FONT_STEP: number = 2;
 // 行距 5 级
 const LINE_LEVELS: number[] = [1.3, 1.5, 1.7, 1.9, 2.1];
+// 阅读设置抽屉高度：按内容（标题 52 + 4 行 + 底部留白）收口，避免大片空白
+const SETTINGS_SHEET_HEIGHT: number = 284;
 
 @Component
 export struct ReaderPanels {
@@ -32,7 +34,6 @@ export struct ReaderPanels {
   @Prop bookmarks: Bookmark[] = [];
   @Prop annotations: Annotation[] = [];
   @Prop isImageBook: boolean = false;
-  @Prop readingMode: ReadingMode = ReadingMode.VERTICAL;
   @Prop pageTurn: PageTurnMode = PageTurnMode.VERTICAL;
   @Prop fontSize: number = 18;
   @Prop lineHeightRatio: number = 1.7;
@@ -41,6 +42,14 @@ export struct ReaderPanels {
   @Prop textAlignMode: TextAlignMode = TextAlignMode.AUTO;
   @Prop theme: ReadingTheme = ReadingTheme.EYE;
   @Prop colors: ReaderThemeColors = new ReaderThemeColors();
+  // 阅读设置：页脚时间电量开关
+  @Prop showFooterTime: boolean = true;
+  // 全文搜索：关键字、进行中状态与进度、结果、逐书历史
+  @Prop searchKeyword: string = '';
+  @Prop searchRunning: boolean = false;
+  @Prop searchProgress: string = '';
+  @Prop searchResults: SearchHit[] = [];
+  @Prop searchHistory: string[] = [];
 
   onClose: () => void = (): void => {};
   onSelectChapter: (index: number) => void = (index: number): void => {};
@@ -48,7 +57,6 @@ export struct ReaderPanels {
   onDeleteBookmark: (bookmark: Bookmark) => void = (bookmark: Bookmark): void => {};
   onSelectAnnotation: (annotation: Annotation) => void = (annotation: Annotation): void => {};
   onDeleteAnnotation: (annotation: Annotation) => void = (annotation: Annotation): void => {};
-  onModeChange: (mode: ReadingMode) => void = (mode: ReadingMode): void => {};
   onFontSizeChange: (size: number) => void = (size: number): void => {};
   onLineHeightChange: (ratio: number) => void = (ratio: number): void => {};
   onThemeChange: (theme: ReadingTheme) => void = (theme: ReadingTheme): void => {};
@@ -60,6 +68,13 @@ export struct ReaderPanels {
   onToggleBookmark: () => void = (): void => {};
   // 操作面板专用：跳章后保持面板打开，由用户自己关闭
   onJumpChapter: (index: number) => void = (index: number): void => {};
+  // 阅读设置：页脚时间电量
+  onToggleFooterTime: (value: boolean) => void = (value: boolean): void => {};
+  // 全文搜索
+  onSearch: (keyword: string) => void = (keyword: string): void => {};
+  onCancelSearch: () => void = (): void => {};
+  onSelectSearchHit: (hit: SearchHit) => void = (hit: SearchHit): void => {};
+  onClearSearchHistory: () => void = (): void => {};
 
   // 目录分档：0 = 全部，n = 第 n 段（每段 30 章）
   @State rangeIndex: number = 0;
@@ -67,7 +82,14 @@ export struct ReaderPanels {
   @State fontSizePreview: number = 0;
   @State lineIndexPreview: number = 0;
   @State progressPreview: number = -1;
+  // 搜索框内容（回车或点「搜索」才提交给父组件，避免每输入一个字就全库扫）
+  @State searchInput: string = '';
   private catalogScroller: Scroller = new Scroller();
+
+  aboutToAppear(): void {
+    // 重新打开面板时沿用上次的关键字
+    this.searchInput = this.searchKeyword;
+  }
 
   private rangeStart(): number {
     if (this.rangeIndex <= 0) {
@@ -360,54 +382,15 @@ export struct ReaderPanels {
     if (this.panel === 'notes') {
       return '笔记';
     }
+    if (this.panel === 'search') {
+      return '全文搜索';
+    }
     return '阅读设置';
   }
 
   private chapterTitleOf(index: number): string {
     const chapter = this.chapters[index];
     return chapter !== undefined ? chapter.title : `第 ${index + 1} 章`;
-  }
-
-  @Builder
-  modeButton(label: string, value: ReadingMode) {
-    Text(label)
-      .fontSize(14)
-      .fontColor(this.readingMode === value ? this.colors.accentText : this.colors.chipText)
-      .backgroundColor(this.readingMode === value ? this.colors.accent : this.colors.chipBg)
-      .padding({ left: 18, right: 18, top: 9, bottom: 9 })
-      .borderRadius(18)
-      .margin({ right: 12 })
-      .onClick(() => {
-        this.onModeChange(value);
-      })
-  }
-
-  @Builder
-  themeButton(label: string, value: ReadingTheme) {
-    Text(label)
-      .fontSize(14)
-      .fontColor(this.theme === value ? this.colors.accentText : this.colors.chipText)
-      .backgroundColor(this.theme === value ? this.colors.accent : this.colors.chipBg)
-      .padding({ left: 14, right: 14, top: 9, bottom: 9 })
-      .borderRadius(18)
-      .margin({ right: 10, bottom: 8 })
-      .onClick(() => {
-        this.onThemeChange(value);
-      })
-  }
-
-  @Builder
-  lineHeightButton(label: string, value: number, matched: boolean) {
-    Text(label)
-      .fontSize(14)
-      .fontColor(matched ? this.colors.accentText : this.colors.chipText)
-      .backgroundColor(matched ? this.colors.accent : this.colors.chipBg)
-      .padding({ left: 18, right: 18, top: 9, bottom: 9 })
-      .borderRadius(18)
-      .margin({ right: 12 })
-      .onClick(() => {
-        this.onLineHeightChange(value);
-      })
   }
 
   @Builder
@@ -688,83 +671,23 @@ export struct ReaderPanels {
           this.onToggleBookmark();
         })
 
-        Text('阅读方向')
-          .width('100%')
-          .fontSize(13)
-          .fontColor(this.colors.panelSubText)
-          .margin({ top: 10, bottom: 10 })
-
-        Row() {
-          this.modeButton('上下', ReadingMode.VERTICAL)
-          this.modeButton('左右', ReadingMode.HORIZONTAL)
-        }
-        .width('100%')
-
-        if (this.isImageBook) {
-          Text('上下模式：双指缩小可同屏查看多张，放大后可左右拖动。')
-            .width('100%')
-            .fontSize(12)
-            .fontColor(this.colors.panelSubText)
-            .lineHeight(20)
-            .margin({ top: 18 })
-        } else {
-          Text('背景')
-            .width('100%')
-            .fontSize(13)
-            .fontColor(this.colors.panelSubText)
-            .margin({ top: 24, bottom: 10 })
-
-          Flex({ wrap: FlexWrap.Wrap }) {
-            this.themeButton('护眼', ReadingTheme.EYE)
-            this.themeButton('白色', ReadingTheme.WHITE)
-            this.themeButton('深色', ReadingTheme.DARK)
-            this.themeButton('随系统', ReadingTheme.SYSTEM)
-          }
-          .width('100%')
-
-          Text('字号')
-            .width('100%')
-            .fontSize(13)
-            .fontColor(this.colors.panelSubText)
-            .margin({ top: 18, bottom: 10 })
-
+        if (!this.isImageBook) {
           Row() {
-            Button('A-')
-              .type(ButtonType.Capsule)
-              .backgroundColor(this.colors.chipBg)
-              .fontColor(this.colors.chipText)
+            Text('页脚显示时间与电量')
               .fontSize(14)
-              .onClick(() => {
-                this.onFontSizeChange(this.fontSize - 2);
-              })
-            Text(`${this.fontSize}`)
-              .width(60)
-              .textAlign(TextAlign.Center)
-              .fontSize(16)
               .fontColor(this.colors.panelText)
-            Button('A+')
-              .type(ButtonType.Capsule)
-              .backgroundColor(this.colors.chipBg)
-              .fontColor(this.colors.chipText)
-              .fontSize(14)
-              .onClick(() => {
-                this.onFontSizeChange(this.fontSize + 2);
+            Blank()
+            Toggle({ type: ToggleType.Switch, isOn: this.showFooterTime })
+              .selectedColor(this.colors.accent)
+              .switchPointColor('#FFFFFF')
+              .onChange((isOn: boolean) => {
+                this.onToggleFooterTime(isOn);
               })
           }
           .width('100%')
-
-          Text('行距')
-            .width('100%')
-            .fontSize(13)
-            .fontColor(this.colors.panelSubText)
-            .margin({ top: 24, bottom: 10 })
-
-          Row() {
-            this.lineHeightButton('紧凑', 1.4, this.lineHeightRatio < 1.55)
-            this.lineHeightButton('标准', 1.7, this.lineHeightRatio >= 1.55 && this.lineHeightRatio < 1.85)
-            this.lineHeightButton('宽松', 2.0, this.lineHeightRatio >= 1.85)
-          }
-          .width('100%')
+          .height(48)
+          .alignItems(VerticalAlign.Center)
+          .border({ width: { bottom: 1 }, color: this.colors.divider })
         }
       }
       .width('100%')
@@ -1308,6 +1231,229 @@ export struct ReaderPanels {
     .padding({ left: 16, right: 16, top: 4, bottom: 16 })
   }
 
+  /** 提交搜索：空关键字忽略（输入框内容由子组件自己维护） */
+  private submitSearch(keyword: string): void {
+    const text: string = keyword.trim();
+    if (text.length === 0) {
+      return;
+    }
+    this.searchInput = text;
+    this.onSearch(text);
+  }
+
+  /** 单条搜索结果：章名 + 前后文片段（关键字用强调色标出） */
+  @Builder
+  searchResultItem(item: SearchHit) {
+    Column() {
+      Text(item.chapterTitle)
+        .width('100%')
+        .fontSize(13)
+        .fontColor(this.colors.panelText)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .margin({ bottom: 6 })
+      Text() {
+        Span(item.before)
+          .fontColor(this.colors.panelSubText)
+        Span(item.match)
+          .fontColor(this.colors.danger)
+        Span(item.after)
+          .fontColor(this.colors.panelSubText)
+      }
+      .width('100%')
+      .fontSize(13)
+      .lineHeight(20)
+      .maxLines(3)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
+      .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+      .backgroundColor(this.colors.chipBg)
+      .borderRadius(10)
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .padding({ top: 8, bottom: 8 })
+    .onClick(() => {
+      this.onSelectSearchHit(item);
+    })
+  }
+
+  /** 搜索历史条目 */
+  @Builder
+  historyChip(keyword: string) {
+    Text(keyword)
+      .fontSize(13)
+      .fontColor(this.colors.chipText)
+      .backgroundColor(this.colors.chipBg)
+      .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+      .borderRadius(14)
+      .margin({ right: 8, bottom: 8 })
+      .maxLines(1)
+      .textOverflow({ overflow: TextOverflow.Ellipsis })
+      .onClick(() => {
+        this.submitSearch(keyword);
+      })
+  }
+
+  /** 全文搜索：输入框 + 搜索历史 / 进行中进度 / 结果列表 */
+  @Builder
+  searchSheet() {
+    Column() {
+      Row() {
+        Text('全文搜索')
+          .fontSize(19)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.colors.panelText)
+          .layoutWeight(1)
+        Row() {
+          Text('✕')
+            .fontSize(13)
+            .fontColor(this.colors.panelSubText)
+        }
+        .width(30)
+        .height(30)
+        .justifyContent(FlexAlign.Center)
+        .alignItems(VerticalAlign.Center)
+        .backgroundColor(this.colors.chipBg)
+        .borderRadius(15)
+        .onClick(() => {
+          this.onClose();
+        })
+      }
+      .width('100%')
+      .height(50)
+      .alignItems(VerticalAlign.Center)
+
+      Search({ value: this.searchInput, placeholder: '搜索本书内容' })
+        .width('100%')
+        .height(40)
+        .backgroundColor(this.colors.chipBg)
+        .fontColor(this.colors.panelText)
+        .placeholderColor(this.colors.panelSubText)
+        .placeholderFont({ size: 14 })
+        .textFont({ size: 14 })
+        .caretStyle({ color: this.colors.accent })
+        .searchButton('搜索')
+        .onChange((value: string) => {
+          this.searchInput = value;
+        })
+        .onSubmit((value: string) => {
+          this.submitSearch(value);
+        })
+
+      if (this.searchRunning) {
+        Column() {
+          LoadingProgress()
+            .width(30)
+            .height(30)
+            .color(this.colors.accent)
+          Text(this.searchProgress.length > 0 ? `正在搜索 ${this.searchProgress}` : '正在搜索…')
+            .fontSize(12)
+            .fontColor(this.colors.panelSubText)
+            .margin({ top: 10 })
+          Text('取消')
+            .fontSize(13)
+            .fontColor(this.colors.accent)
+            .padding(10)
+            .onClick(() => {
+              this.onCancelSearch();
+            })
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+      } else if (this.searchResults.length > 0) {
+        Row() {
+          Text(`找到 ${this.searchResults.length} 处`)
+            .fontSize(12)
+            .fontColor(this.colors.panelSubText)
+          Blank()
+          Text(this.searchKeyword)
+            .fontSize(12)
+            .fontColor(this.colors.accent)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .constraintSize({ maxWidth: '60%' })
+        }
+        .width('100%')
+        .height(34)
+        .alignItems(VerticalAlign.Center)
+
+        List() {
+          ForEach(this.searchResults, (item: SearchHit) => {
+            ListItem() {
+              this.searchResultItem(item)
+            }
+            .width('100%')
+          }, (item: SearchHit) => `${item.chapterIndex}_${item.charOffset}`)
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .divider({ strokeWidth: 1, color: this.colors.divider, startMargin: 0, endMargin: 0 })
+        .scrollBar(BarState.Off)
+      } else if (this.searchKeyword.length > 0) {
+        Column() {
+          Text('没有找到相关内容')
+            .fontSize(14)
+            .fontColor(this.colors.panelSubText)
+          Text(`关键字：${this.searchKeyword}`)
+            .fontSize(12)
+            .fontColor(this.colors.panelSubText)
+            .margin({ top: 8 })
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+      } else {
+        Row() {
+          Text('搜索历史')
+            .fontSize(14)
+            .fontColor(this.colors.panelText)
+          Blank()
+          if (this.searchHistory.length > 0) {
+            Text('清空')
+              .fontSize(13)
+              .fontColor(this.colors.panelSubText)
+              .padding({ left: 10, top: 6, bottom: 6 })
+              .onClick(() => {
+                this.onClearSearchHistory();
+              })
+          }
+        }
+        .width('100%')
+        .height(40)
+        .alignItems(VerticalAlign.Center)
+
+        Flex({ wrap: FlexWrap.Wrap }) {
+          ForEach(this.searchHistory, (item: string) => {
+            this.historyChip(item)
+          }, (item: string) => item)
+        }
+        .width('100%')
+
+        if (this.searchHistory.length === 0) {
+          Text('在全书范围内查找关键字，点击结果可跳转到原文位置')
+            .width('100%')
+            .fontSize(12)
+            .fontColor(this.colors.panelSubText)
+            .lineHeight(18)
+        }
+        Blank()
+      }
+    }
+    .width('calc(100% - 24vp)')
+    .height('72%')
+    .margin({ bottom: CONTROL_BAR_SPACE })
+    .backgroundColor(this.colors.bg)
+    .borderRadius(20)
+    .border({ width: 1, color: this.colors.divider })
+    .shadow({ radius: 24, color: '#26000000', offsetX: 0, offsetY: 6 })
+    .padding({ left: 18, right: 18, bottom: 18 })
+  }
+
   /** 书签 / 设置抽屉：沿用简单的标题栏 */
   @Builder
   plainSheet() {
@@ -1340,7 +1486,7 @@ export struct ReaderPanels {
       }
     }
     .width('calc(100% - 24vp)')
-    .height('58%')
+    .height(this.panel === 'bookmarks' ? '58%' : SETTINGS_SHEET_HEIGHT)
     .margin({ bottom: CONTROL_BAR_SPACE })
     .backgroundColor(this.colors.bg)
     .borderRadius(20)
@@ -1379,6 +1525,8 @@ export struct ReaderPanels {
         this.backgroundSheet()
       } else if (this.panel === 'pageturn') {
         this.pageTurnSheet()
+      } else if (this.panel === 'search') {
+        this.searchSheet()
       } else {
         this.plainSheet()
       }

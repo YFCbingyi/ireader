@@ -397,6 +397,8 @@ struct ReaderFooter {
   @Prop chapterText: string = '';
   @Prop badgeBg: string = '#00000000';
   @Prop subTextColor: string = '#8C8C8C';
+  // 页脚左侧时间与电量：由阅读设置控制，关闭时左侧留空
+  @Prop showClock: boolean = true;
   @State clock: string = '';
   @State battery: number = -1;
 
@@ -441,17 +443,19 @@ struct ReaderFooter {
 
   build() {
     Row() {
-      Text(this.clock)
-        .fontSize(FOOTER_TEXT_SIZE)
-        .fontColor(this.subTextColor)
-      if (this.battery >= 0) {
-        Text(`${this.battery}`)
-          .fontSize(9)
+      if (this.showClock) {
+        Text(this.clock)
+          .fontSize(FOOTER_TEXT_SIZE)
           .fontColor(this.subTextColor)
-          .backgroundColor(this.badgeBg)
-          .borderRadius(4)
-          .padding({ left: 5, right: 5, top: 1, bottom: 1 })
-          .margin({ left: 6 })
+        if (this.battery >= 0) {
+          Text(`${this.battery}`)
+            .fontSize(9)
+            .fontColor(this.subTextColor)
+            .backgroundColor(this.badgeBg)
+            .borderRadius(4)
+            .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+            .margin({ left: 6 })
+        }
       }
       Blank()
       Text(this.chapterText.length > 0 ? this.chapterText : this.progressText)
@@ -489,6 +493,8 @@ export struct TextReaderView {
   @Prop dividerColor: string = '#EFE7D8';
   @Prop accentColor: string = '#8B5E3C';
   @Prop accentTextColor: string = '#FFF8ED';
+  // 页脚左侧显示时间与电量（阅读设置开关）
+  @Prop showFooterTime: boolean = true;
   // 控制栏显示时锁定翻页与滑动，避免误触
   @Prop controlsVisible: boolean = false;
 
@@ -1865,7 +1871,8 @@ export struct TextReaderView {
         progressText: this.footerProgress(),
         chapterText: this.footerChapter(),
         badgeBg: this.dividerColor,
-        subTextColor: this.subTextColor
+        subTextColor: this.subTextColor,
+        showClock: this.showFooterTime
       })
     }
     .width('100%')

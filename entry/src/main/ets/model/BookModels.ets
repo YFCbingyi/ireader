@@ -162,6 +162,30 @@ export class ReaderSettings {
   // 正文字体：空串 = 系统默认字体
   fontFamily: string = '';
   textAlignMode: TextAlignMode = TextAlignMode.AUTO;
+  // 页脚左侧是否显示时间与电量（文本书）
+  showFooterTime: boolean = true;
+}
+
+/** 全文搜索命中：章号 + 章内偏移 + 前后文片段（关键字单独成段，供结果列表高亮） */
+export class SearchHit {
+  chapterIndex: number = 0;
+  charOffset: number = 0;
+  chapterTitle: string = '';
+  before: string = '';
+  match: string = '';
+  after: string = '';
+
+  static of(chapterIndex: number, charOffset: number, chapterTitle: string, before: string, match: string,
+    after: string): SearchHit {
+    const hit = new SearchHit();
+    hit.chapterIndex = chapterIndex;
+    hit.charOffset = charOffset;
+    hit.chapterTitle = chapterTitle;
+    hit.before = before;
+    hit.match = match;
+    hit.after = after;
+    return hit;
+  }
 }
 
 export class ReaderParams {

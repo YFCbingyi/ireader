@@ -15,11 +15,14 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 
 const DOMAIN = 0x0002;
 const TAG = 'LibraryStore';
+// 全文搜索历史条数上限
+const SEARCH_HISTORY_LIMIT = 10;
 
 export class LibraryStore {
   static init(): void {
     FileUtil.ensureDir(`${AppPaths.getFilesDir()}/books`);
     FileUtil.ensureDir(`${AppPaths.getFilesDir()}/bookmarks`);
+    FileUtil.ensureDir(`${AppPaths.getFilesDir()}/search`);
   }
 
   private static libraryPath(): string {
@@ -36,6 +39,39 @@ export class LibraryStore {
 
   private static manifestPath(bookId: string): string {
     return `${AppPaths.bookDir(bookId)}/manifest.json`;
+  }
+
+  private static searchHistoryPath(bookId: string): string {
+    return `${AppPaths.getFilesDir()}/search/${bookId}.json`;
+  }
+
+  /** 全文搜索历史：逐书保存，最新在前，最多 SEARCH_HISTORY_LIMIT 条 */
+  static getSearchHistory(bookId: string): string[] {
+    const raw = FileUtil.readText(LibraryStore.searchHistoryPath(bookId));
+    if (raw.length === 0) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(raw) as string[];
+      const result: string[] = [];
+      for (let i = 0; i < parsed.length; i++) {
+        const item = parsed[i];
+        if (typeof item === 'string' && item.length > 0 && result.indexOf(item) < 0) {
+          result.push(item);
+        }
+        if (result.length >= SEARCH_HISTORY_LIMIT) {
+          break;
+        }
+      }
+      return result;
+    } catch (e) {
+      hilog.error(DOMAIN, TAG, 'parse search history failed: %{public}s', bookId);
+      return [];
+    }
+  }
+
+  static saveSearchHistory(bookId: string, keywords: string[]): void {
+    FileUtil.writeTextAtomic(LibraryStore.searchHistoryPath(bookId), JSON.stringify(keywords));
   }
 
   static getBooks(): BookMeta[] {
@@ -196,6 +232,10 @@ export class LibraryStore {
       }
       if (parsed.textAlignMode === undefined) {
         parsed.textAlignMode = TextAlignMode.AUTO;
+      }
+      // 页脚时间电量默认显示；旧配置没有这个字段
+      if (parsed.showFooterTime === undefined) {
+        parsed.showFooterTime = true;
       }
       return parsed;
     } catch (e) {
