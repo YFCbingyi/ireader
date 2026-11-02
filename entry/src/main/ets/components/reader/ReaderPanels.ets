@@ -1,3 +1,4 @@
+import { Annotation } from '../../model/Annotation';
 import { Bookmark, ChapterMeta, ReadingMode } from '../../model/BookModels';
 import { ReaderThemeColors, ReadingTheme } from '../../model/ReaderTheme';
 
@@ -7,6 +8,7 @@ export struct ReaderPanels {
   @Prop chapters: ChapterMeta[] = [];
   @Prop currentChapter: number = 0;
   @Prop bookmarks: Bookmark[] = [];
+  @Prop annotations: Annotation[] = [];
   @Prop isImageBook: boolean = false;
   @Prop readingMode: ReadingMode = ReadingMode.VERTICAL;
   @Prop fontSize: number = 18;
@@ -18,6 +20,8 @@ export struct ReaderPanels {
   onSelectChapter: (index: number) => void = (index: number): void => {};
   onSelectBookmark: (bookmark: Bookmark) => void = (bookmark: Bookmark): void => {};
   onDeleteBookmark: (bookmark: Bookmark) => void = (bookmark: Bookmark): void => {};
+  onSelectAnnotation: (annotation: Annotation) => void = (annotation: Annotation): void => {};
+  onDeleteAnnotation: (annotation: Annotation) => void = (annotation: Annotation): void => {};
   onModeChange: (mode: ReadingMode) => void = (mode: ReadingMode): void => {};
   onFontSizeChange: (size: number) => void = (size: number): void => {};
   onLineHeightChange: (ratio: number) => void = (ratio: number): void => {};
@@ -30,7 +34,15 @@ export struct ReaderPanels {
     if (this.panel === 'bookmarks') {
       return '书签';
     }
+    if (this.panel === 'notes') {
+      return '笔记';
+    }
     return '阅读设置';
+  }
+
+  private chapterTitleOf(index: number): string {
+    const chapter = this.chapters[index];
+    return chapter !== undefined ? chapter.title : `第 ${index + 1} 章`;
   }
 
   @Builder
@@ -170,6 +182,91 @@ export struct ReaderPanels {
     }
   }
 
+  /** 笔记：划线 + 想法的全量列表，点击回到原文位置 */
+  @Builder
+  notesPanel() {
+    if (this.annotations.length === 0) {
+      Column() {
+        Text('还没有划线和想法')
+          .fontSize(15)
+          .fontColor(this.colors.panelSubText)
+        Text('长按正文选中文字，即可划线或记录想法')
+          .fontSize(12)
+          .fontColor(this.colors.panelSubText)
+          .margin({ top: 8 })
+      }
+      .layoutWeight(1)
+      .width('100%')
+      .justifyContent(FlexAlign.Center)
+      .alignItems(HorizontalAlign.Center)
+    } else {
+      List() {
+        ForEach(this.annotations, (item: Annotation) => {
+          ListItem() {
+            Row() {
+              Column() {
+                Row() {
+                  Text(item.note.length > 0 ? '想法' : '划线')
+                    .fontSize(11)
+                    .fontColor(item.note.length > 0 ? this.colors.accentText : this.colors.chipText)
+                    .backgroundColor(item.note.length > 0 ? this.colors.accent : this.colors.chipBg)
+                    .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+                    .borderRadius(6)
+                  Text(this.chapterTitleOf(item.chapterIndex))
+                    .fontSize(12)
+                    .fontColor(this.colors.panelSubText)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .margin({ left: 8 })
+                    .layoutWeight(1)
+                }
+                .width('100%')
+
+                Text(item.text)
+                  .width('100%')
+                  .fontSize(14)
+                  .fontColor(this.colors.panelText)
+                  .maxLines(2)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .margin({ top: 6 })
+
+                if (item.note.length > 0) {
+                  Text(item.note)
+                    .width('100%')
+                    .fontSize(13)
+                    .fontColor(this.colors.panelSubText)
+                    .maxLines(3)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .margin({ top: 4 })
+                }
+              }
+              .layoutWeight(1)
+              .alignItems(HorizontalAlign.Start)
+              .onClick(() => {
+                this.onSelectAnnotation(item);
+              })
+
+              Text('删除')
+                .fontSize(13)
+                .fontColor(this.colors.danger)
+                .padding({ left: 12, top: 8, bottom: 8 })
+                .onClick(() => {
+                  this.onDeleteAnnotation(item);
+                })
+            }
+            .width('100%')
+            .padding({ top: 12, bottom: 12 })
+            .border({ width: { bottom: 1 }, color: this.colors.divider })
+          }
+          .width('100%')
+        }, (item: Annotation) => `${item.id}_${item.note.length}`)
+      }
+      .layoutWeight(1)
+      .width('100%')
+      .scrollBar(BarState.Off)
+    }
+  }
+
   @Builder
   settingsPanel() {
     Scroll() {
@@ -298,6 +395,8 @@ export struct ReaderPanels {
           this.catalogPanel()
         } else if (this.panel === 'bookmarks') {
           this.bookmarksPanel()
+        } else if (this.panel === 'notes') {
+          this.notesPanel()
         } else {
           this.settingsPanel()
         }

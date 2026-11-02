@@ -1,5 +1,6 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { ReadingMode } from '../../model/BookModels';
+import { Annotation, SegmentBuilder, TextSegment } from '../../model/Annotation';
 import { TextPaginator } from '../../service/TextPaginator';
 
 const DOMAIN = 0x0006;
@@ -29,6 +30,8 @@ const PAGE_PREFETCH_NEXT_DELAY = 220;
 const PAGE_PREFETCH_PREV_DELAY = 560;
 // 点击分区：两侧 30% 翻页（左右模式翻页 / 上下模式翻屏），中间 40% 唤起控制栏
 const TAP_SIDE_RATIO = 0.3;
+// 正文点击去抖：双击选词会连发两次 click，200ms 内的第二次忽略
+const TEXT_TAP_GUARD = 200;
 // 上下模式点击翻屏只滚可视高度的 90%，保留少量重叠便于衔接上下文
 const TAP_SCROLL_RATIO = 0.9;
 const TAP_SCROLL_DURATION = 240;
@@ -36,6 +39,10 @@ const TAP_SCROLL_DURATION = 240;
 const WINDOW_RADIUS = 2;
 const WINDOW_MAX_CHAPTERS = 8;
 const LOAD_AHEAD_BLOCKS = 12;
+// 长按选词菜单的自定义项 id（系统菜单项之外追加，复制/全选仍由系统提供）
+const MENU_HIGHLIGHT = 'ireader_highlight';
+const MENU_NOTE = 'ireader_note';
+const MENU_DICT = 'ireader_dict';
 
 /** 左右分页的一页：带所属章与章内字符偏移，key 跨章唯一 */
 class PagedItem {
@@ -191,6 +198,21 @@ class PagedSource implements IDataSource {
     return count;
   }
 
+  /** 通知区间内的页内容变了（划线刷新），只重建这些项 */
+  refreshRange(from: number, to: number): void {
+    const total = this.items.length;
+    if (total === 0) {
+      return;
+    }
+    const start = from < 0 ? 0 : from;
+    const end = to >= total ? total - 1 : to;
+    for (let i = start; i <= end; i++) {
+      for (let j = 0; j < this.listeners.length; j++) {
+        this.listeners[j].onDataChange(i);
+      }
+    }
+  }
+
   /** 某章在当前窗口内的起始页索引，不存在返回 -1 */
   chapterStartIndex(chapter: number): number {
     for (let i = 0; i < this.items.length; i++) {
@@ -316,6 +338,21 @@ class ReaderBlockSource implements IDataSource {
     }
   }
 
+  /** 通知区间内的块内容变了（划线刷新），只重建这些项 */
+  refreshRange(from: number, to: number): void {
+    const total = this.blocks.length;
+    if (total === 0) {
+      return;
+    }
+    const start = from < 0 ? 0 : from;
+    const end = to >= total ? total - 1 : to;
+    for (let i = start; i <= end; i++) {
+      for (let j = 0; j < this.listeners.length; j++) {
+        this.listeners[j].onDataChange(i);
+      }
+    }
+  }
+
   /** 从尾部移除 count 块 */
   removeTail(count: number): void {
     if (count <= 0 || this.blocks.length === 0) {
@@ -407,6 +444,17 @@ export struct TextReaderView {
   // 控制栏显示时锁定翻页与滑动，避免误触
   @Prop controlsVisible: boolean = false;
 
+  // 划线 / 想法：按章取标注（父组件注入，内部按章分组缓存）；版本号变化时重建可见块刷新样式
+  @Prop @Watch('onAnnotationsChanged') annotationsVersion: number = 0;
+  @Prop annotationBg: string = '#40E8B339';
+  @Prop annotationLine: string = '#C08A22';
+  annotationsOf: (chapterIndex: number) => Annotation[] = (chapterIndex: number): Annotation[] => [];
+  onToggleHighlight: (chapter: number, start: number, end: number, text: string) => void =
+    (chapter: number, start: number, end: number, text: string): void => {};
+  onRequestNote: (chapter: number, start: number, end: number, text: string) => void =
+    (chapter: number, start: number, end: number, text: string): void => {};
+  onLookup: (word: string) => void = (word: string): void => {};
+
   // 竖排连续卷轴：跳转目标（初始打开 / 目录 / 书签共用），jumpVersion 变化时重建窗口并定位
   @Prop @Watch('onJump') jumpVersion: number = 0;
   @Prop jumpChapter: number = 0;
@@ -471,6 +519,8 @@ export struct TextReaderView {
   private lastWidth: number = 0;
   private lastHeight: number = 0;
   private lastReportTime: number = 0;
+  // 正文点击去抖时间戳（双击选词连发的第二次 click）
+  private lastTextTapAt: number = 0;
   private restoreTimer: number = -1;
   private readyTimer: number = -1;
   // 竖排定位：数据源变化后，在 List 完成布局（onScrollIndex 首次回调）时滚动到目标块
@@ -1304,6 +1354,142 @@ export struct TextReaderView {
     this.onProgress(this.currentChapter, this.currentCharOffset, this.currentRatio);
   }
 
+  // ================= 长按选词：复制 / 划线 / 想法 / 词典 =================
+
+  /**
+   * 标注变化：只刷新可视区附近的项。
+   * LazyForEach 不会因为外部普通状态变化重跑 item builder，
+   * 必须显式 onDataChange 才能让划线即时显示（否则要退出重进）。
+   */
+  private onAnnotationsChanged(): void {
+    if (this.mode === ReadingMode.VERTICAL) {
+      this.blockSource.refreshRange(this.lastVisibleStart - 1, this.lastVisibleEnd + 1);
+    } else {
+      this.pageSource.refreshRange(this.currentPage - 1, this.currentPage + 1);
+    }
+  }
+
+  /** 该块内是否有标注（没有则走纯文本快路径，不切 Span） */
+  private hasAnnotation(chapter: number, baseStart: number, length: number): boolean {
+    if (length <= 0) {
+      return false;
+    }
+    const list = this.annotationsOf(chapter);
+    const baseEnd = baseStart + length;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].intersects(baseStart, baseEnd)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static menuItem(id: string, label: string): TextMenuItem {
+    const item: TextMenuItem = {
+      content: label,
+      id: TextMenuItemId.of(id)
+    };
+    return item;
+  }
+
+  /**
+   * 选词菜单：系统默认项（复制 / 全选）保留，追加三项自定义动作。
+   * onMenuItemClick 直接带回选中区间，省掉自己维护选区状态的麻烦。
+   */
+  private selectionMenu(chapter: number, baseStart: number, content: string): EditMenuOptions {
+    const options: EditMenuOptions = {
+      onCreateMenu: (items: Array<TextMenuItem>): Array<TextMenuItem> => {
+        const result: Array<TextMenuItem> = [];
+        for (let i = 0; i < items.length; i++) {
+          result.push(items[i]);
+        }
+        result.push(TextReaderView.menuItem(MENU_HIGHLIGHT, '划线'));
+        result.push(TextReaderView.menuItem(MENU_NOTE, '想法'));
+        result.push(TextReaderView.menuItem(MENU_DICT, '词典'));
+        return result;
+      },
+      onMenuItemClick: (item: TextMenuItem, range: TextRange): boolean => {
+        return this.handleMenuItem(item, range, chapter, baseStart, content);
+      }
+    };
+    return options;
+  }
+
+  private handleMenuItem(item: TextMenuItem, range: TextRange, chapter: number, baseStart: number,
+    content: string): boolean {
+    const rawStart = range.start !== undefined ? range.start : 0;
+    const rawEnd = range.end !== undefined ? range.end : 0;
+    if (rawEnd <= rawStart || rawStart < 0 || rawEnd > content.length) {
+      return false;
+    }
+    const text = content.substring(rawStart, rawEnd);
+    if (text.length === 0) {
+      return false;
+    }
+    const start = baseStart + rawStart;
+    const end = baseStart + rawEnd;
+    if (item.id.equals(TextMenuItemId.of(MENU_HIGHLIGHT))) {
+      this.onToggleHighlight(chapter, start, end, text);
+      return true;
+    }
+    if (item.id.equals(TextMenuItemId.of(MENU_NOTE))) {
+      this.onRequestNote(chapter, start, end, text);
+      return true;
+    }
+    if (item.id.equals(TextMenuItemId.of(MENU_DICT))) {
+      this.onLookup(text);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * 正文块：可长按选词。无标注时直接用纯文本（快路径），
+   * 有标注时切成 Span 片段分别加底色 / 下划线。
+   * 注意 ForEach 的 key 里必须带上 annotationsVersion 的上下游依赖，
+   * 标注变化时由 LazyForEach key 变化触发重建。
+   */
+  @Builder
+  bodyText(content: string, baseStart: number, chapter: number) {
+    if (this.hasAnnotation(chapter, baseStart, content.length)) {
+      Text() {
+        ForEach(SegmentBuilder.build(content, baseStart, this.annotationsOf(chapter)),
+          (seg: TextSegment) => {
+            Span(seg.text)
+              .fontColor(this.textColor)
+              .decoration({
+                type: seg.underline ? TextDecorationType.Underline : TextDecorationType.None,
+                color: this.annotationLine
+              })
+              .textBackgroundStyle({
+                color: seg.highlight ? this.annotationBg : '#00000000',
+                radius: 3
+              })
+          }, (seg: TextSegment) => seg.key)
+      }
+      .width('100%')
+      .fontSize(this.fontSize)
+      .lineHeight(this.lineHeightValue())
+      .fontColor(this.textColor)
+      .copyOption(CopyOptions.LocalDevice)
+      .editMenuOptions(this.selectionMenu(chapter, baseStart, content))
+      .onClick((event: ClickEvent) => {
+        this.handleTextTap(event);
+      })
+    } else {
+      Text(content)
+        .width('100%')
+        .fontSize(this.fontSize)
+        .lineHeight(this.lineHeightValue())
+        .fontColor(this.textColor)
+        .copyOption(CopyOptions.LocalDevice)
+        .editMenuOptions(this.selectionMenu(chapter, baseStart, content))
+        .onClick((event: ClickEvent) => {
+          this.handleTextTap(event);
+        })
+    }
+  }
+
   // ================= 点击分区：两侧翻页 / 中间唤起控制栏 =================
 
   /**
@@ -1312,13 +1498,31 @@ export struct TextReaderView {
    * - 上下模式：上侧 30% 上翻一屏，下侧 30% 下翻一屏，中间唤起控制栏。
    */
   private handleTap(event: ClickEvent): void {
+    this.applyTap(event.x, event.y);
+  }
+
+  /**
+   * 正文上的单击：可选中文本后，文字会吃掉根容器上的 onClick，
+   * 所以每块正文自己也挂一份，坐标用窗口坐标（点击点相对自身的 x/y 不能用）。
+   * 双击选词会连发两次 click，这里做 200ms 去抖，避免"开了控制栏又马上关掉/连翻两页"。
+   */
+  private handleTextTap(event: ClickEvent): void {
+    const now = Date.now();
+    if (now - this.lastTextTapAt < TEXT_TAP_GUARD) {
+      return;
+    }
+    this.lastTextTapAt = now;
+    this.applyTap(event.windowX, event.windowY);
+  }
+
+  private applyTap(x: number, y: number): void {
     if (this.controlsVisible) {
       this.onTap();
       return;
     }
     if (this.mode === ReadingMode.HORIZONTAL) {
       const width = this.lastWidth > 0 ? this.lastWidth : 1;
-      const ratio = event.x / width;
+      const ratio = x / width;
       if (ratio < TAP_SIDE_RATIO) {
         this.turnPage(-1);
         return;
@@ -1331,7 +1535,7 @@ export struct TextReaderView {
       return;
     }
     const height = this.lastHeight > 0 ? this.lastHeight : 1;
-    const ratio = event.y / height;
+    const ratio = y / height;
     if (ratio < TAP_SIDE_RATIO) {
       this.scrollScreen(-1);
       return;
@@ -1427,16 +1631,12 @@ export struct TextReaderView {
               .fontColor(this.textColor)
               .padding({ top: index === 0 ? 0 : TITLE_GAP * 2, bottom: TITLE_GAP })
           } else {
-            Text(block.text)
-              .width('100%')
-              .fontSize(this.fontSize)
-              .lineHeight(this.lineHeightValue())
-              .fontColor(this.textColor)
+            this.bodyText(block.text, block.start, block.chapterIndex)
           }
         }
         .width('100%')
       }, (block: ReaderBlock, index: number) =>
-        `${block.chapterIndex}_${block.kind}_${block.start}_${block.text.length}`)
+        `${block.chapterIndex}_${block.kind}_${block.start}_${block.text.length}_${this.annotationsVersion}`)
     }
     .width('100%')
     .height('100%')
@@ -1475,11 +1675,7 @@ export struct TextReaderView {
               .fontColor(this.textColor)
               .margin({ bottom: TITLE_GAP })
           }
-          Text(item.text)
-            .width('100%')
-            .fontSize(this.fontSize)
-            .lineHeight(this.lineHeightValue())
-            .fontColor(this.textColor)
+          this.bodyText(item.text, item.start, item.chapter)
         }
         .width('100%')
         .height('100%')
@@ -1491,7 +1687,7 @@ export struct TextReaderView {
           top: CONTENT_PAD,
           bottom: CONTENT_PAD
         })
-      }, (item: PagedItem) => `${item.key}_${item.text.length}`)
+      }, (item: PagedItem) => `${item.key}_${item.text.length}_${this.annotationsVersion}`)
     }
     .width('100%')
     .height('100%')

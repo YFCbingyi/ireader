@@ -42,6 +42,7 @@ entry/src/main/ets/
 │   ├── BookModels.ets        # 全部领域模型与枚举（BookType / ReadingMode / ReadingProgress /
 │   │                         #   BookMeta / ChapterMeta / ImageEntry / BookManifest / Bookmark /
 │   │                         #   ReaderSettings / ImportResult / ImportProgressCallback）
+│   ├── Annotation.ets        # 划线/想法模型（Annotation）+ 渲染片段切分（SegmentBuilder）
 │   ├── ReaderTheme.ets       # ReadingTheme 枚举 + ReaderThemeColors 三套配色
 │   └── ReadingStats.ets      # 阅读时长统计模型
 ├── service/
@@ -50,6 +51,7 @@ entry/src/main/ets/
 │   ├── TextCodec.ets         # 编码识别 + 章节切分（decode / normalize / splitChapters）
 │   ├── TextPaginator.ets     # 单章分页（PaginationSession 可分批推进：探针标定 + 字宽模型 + 单页校验）
 │   ├── ImageMetaReader.ets   # 读取图片宽高，产出 ImageEntry
+│   ├── AnnotationStore.ets   # 划线/想法的逐书 JSON 读写与查找
 │   ├── LibraryStore.ets      # 书架/清单/设置/书签的 JSON 读写
 │   ├── ReadingStatsStore.ets # 阅读时长累计
 │   └── (无 EdgeTurnTracker —— 已删除)
@@ -127,6 +129,7 @@ filesDir/
 ├── settings.json                # ReaderSettings（全局字号/行距/主题/两类书的阅读方向）
 ├── reading_stats.json           # 阅读时长
 ├── bookmarks/{bookId}.json      # Bookmark[]
+├── annotations/{bookId}.json    # Annotation[]（划线/想法，按章+章内偏移）
 └── books/{bookId}/
     ├── manifest.json            # BookManifest
     ├── text/0001.txt ...        # TXT 每章一个文件（4 位补零）
@@ -180,6 +183,8 @@ aboutToAppear
 | `loadVersion` | 触发子组件重新加载（左右模式重分页） |
 | `turnMaskVisible` | 纯色遮挡，只在按钮/目录/书签触发的 `openChapter` 出现 |
 | `chapterTextCache / cacheKeys` | 章节全文 LRU：最多 12 章、单章 ≤ 40 万字符 |
+| `annotations / annotationsVersion / annotationIndex` | 划线想法数据、渲染版本号、按章分组的索引 |
+| `noteVisible / noteDraft / noteExistingId` | 想法编辑面板状态（新增还是编辑已有标注） |
 | `readingMode` | **按书类型统一**：TXT 读 `settings.textReadingMode`，图片书读 `settings.imageReadingMode`（见 7.1） |
 
 关键流程：
@@ -263,6 +268,32 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 - **页脚**：`第 x/y 章 · z%`，不含页号。
 - **点击分区**（`handleTap`）：左侧 30% 上一页、右侧 30% 下一页（`turnPage`），中间 40% 唤起控制栏。翻页到达窗口端部时先 `await` 补章，再延迟 60ms 越过 `beginPageSync` 锁执行 `changeIndex(..., true)`。
 
+### 8.3 长按选词：复制 / 划线 / 想法 / 词典
+
+正文 `Text` 开启 `copyOption(CopyOptions.LocalDevice)`，长按即可拖选；菜单通过
+`editMenuOptions` 在系统默认项（复制 / 全选）之后追加三项自定义动作：
+
+| 菜单项 | 实现 |
+|---|---|
+| 复制 | 系统自带，无需代码 |
+| 划线 | `onMenuItemClick` 取 `TextRange` → 父组件 `toggleHighlight`：有交集则取消，否则新增 `AnnotationKind.HIGHLIGHT` |
+| 想法 | 父组件打开底部编辑面板（`Reader.noteEditor`），保存为 `AnnotationKind.NOTE`（带下划线） |
+| 词典 | 弹卡片显示选中的词，用户选「复制」或「浏览器查词典」（`openLink`）——本机无系统词典应用，直接跳浏览器会打断阅读 |
+
+要点：
+
+- 标注坐标是「章号 + 章内字符偏移」，与 `ReadingProgress.charOffset` 同坐标，跨排版与跨阅读模式都稳定。
+- 渲染：块内无标注走 `Text(content)` 快路径；有标注时用 `Text() { ForEach(SegmentBuilder.build(...)) { Span } }`
+  切分为样式片段：划线统一 `decoration(Underline)`，带想法的再加 `textBackgroundStyle` 浅底（无标注片段用透明色/None 占位）。
+- 刷新：`annotationsVersion` 变化时 `@Watch` 调 `onDataChange` 只刷新可见区（竖排 `lastVisibleStart-1..lastVisibleEnd+1`，
+  左右 `currentPage±1`）。**只改 key 不够**——`LazyForEach` 缓存了每项的 key，外部状态变化不会重跑 item builder，
+  必须显式 `listener.onDataChange(index)` 才会重建该项，否则表现为"划线要退出重进才显示"。
+- 单击：可选中文本后，正文 `Text` 会吃掉根容器的 `onClick`，所以每块正文自己也挂了 `onClick`，
+  坐标用 `ClickEvent.windowX/windowY`（相对自身的 x/y 不能用）换算点击分区；双击选词会连发两次 click，做 200ms 去抖。
+- 笔记列表：控制栏「笔记」→ `ReaderPanels` 的 `notesPanel`，按阅读顺序列出划线/想法，点击跳原文、可删除。
+- 菜单动作拿到的 `range` 是**块内偏移**，需加上块的 `start`（竖排 `ReaderBlock.start` / 左右 `PagedItem.start`）才是章内偏移。
+- `Annotation` 实例方法（`intersects`）在 `AnnotationStore.load` 里必须重建为实例——`JSON.parse` 出来的普通对象没有方法。
+
 ## 9. 图片书渲染（`components/reader/ImageReaderView.ets`）
 
 图片数据来自 `manifest.chapters[i].images`（内存中已有宽高，无需读盘）。
@@ -282,7 +313,7 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 1. **补偿必须无动画**：`scrollToIndex(..., false, ...)` / `changeIndex(..., false)`。带动画补偿一定会被看见。
 2. **前插与锁成对**：`prepend*` / `reset` / 头部回收 之前必须 `beginPageSync()`，否则 Swiper/List 的临时索引会被当成用户翻页。
 3. **不要直接改 `.index`**：左右模式跳页一律 `swiperController.changeIndex(target, animate)`，直接改 `.index` 动效不生效。
-4. **LazyForEach key 必须唯一稳定**：竖排 `` `${chapterIndex}_${kind}_${start}_${len}` ``，左右 `` `${item.key}_${text.length}` ``，图片 `page.key`。
+4. **LazyForEach key 必须唯一稳定**：竖排 `` `${chapterIndex}_${kind}_${start}_${len}_${annotationsVersion}` ``，左右 `` `${item.key}_${text.length}_${annotationsVersion}` ``，图片 `page.key`。标注版本进 key 是为了让划线/想法变化能重跑 item builder（LazyForEach 不跟踪外部普通字段）。
 5. **窗口有上限**：竖排 8 章、左右 5 章，超限必须回收端部章，否则内存随阅读时长线性增长。
 6. **空章必须跳过**：图片书 `images.length === 0` 时只推进 `pageWindowEnd` 不产页，否则 `ensurePageWindow` 会原地死循环。
 7. **`chapterTextProvider` 必须幂等且带缓存**：竖排 ±2 章 + 左右 ±1 章会并发调用，父组件 `loadChapterTextAsync` 已做 12 章 LRU。
