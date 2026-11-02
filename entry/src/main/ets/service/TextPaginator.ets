@@ -17,91 +17,359 @@ export class PaginationResult {
   pageStarts: number[] = [];
 }
 
-const PAGE_BREAK_BACK_LINES = 1;
+/** 单页测量校正的最大迭代次数 */
+const FIT_MAX_ITERATIONS = 5;
+/** 标定探针：全角样本字数 / 半角样本 / 行高样本行数 */
+const CJK_PROBE_COUNT = 20;
+const ASCII_PROBE = 'abcdefghijklmnopqrstuvwxyz';
+const LINE_PROBE_ROWS = 8;
+const LINE_PROBE_CHARS = 6;
+const MIN_LINES_PER_PAGE = 1;
+/** 一次性跑完分页时的单片页数（仅 paginate() 同步入口使用） */
+const FULL_STEP_PAGES = 256;
+/** 同步入口的死循环保护 */
+const MAX_PAGE_GUARD = 20000;
+
+/**
+ * 排版标定值（像素单位）。
+ *
+ * 旧实现每页都要二分 measureTextSize：候选窗口 2500~8000 字、每页 10+ 次测量，
+ * 一章几万字时主线程要连卡几秒（首屏白屏）。
+ * 现在改为先用几根探针标定字宽与行高，之后按字符宽度模型推算每页边界，
+ * 每页再用一次实测校验（个别页补测），测量次数和测量文本长度都降了一个数量级。
+ */
+export class PaginationMetrics {
+  cjkWidth: number = 1;
+  asciiWidth: number = 1;
+  lineHeight: number = 1;
+  maxWidth: number = 1;
+}
+
+/**
+ * 分页游标：可分批推进。
+ * 调用方每片调一次 step()，片间让出主线程，长章节既不会一次性占满主线程，
+ * 也能随时丢弃中途结果（字号 / 行距 / 视口变化）。
+ */
+export class PaginationSession {
+  private text: string = '';
+  private widthVp: number = 0;
+  private fontSize: number = 0;
+  private lineHeightVp: number = 0;
+  private pageHeightPx: number = 1;
+  private firstPageHeightPx: number = 1;
+  private utils: MeasureUtils | undefined = undefined;
+  private metrics: PaginationMetrics = new PaginationMetrics();
+  private cursor: number = 0;
+  private finished: boolean = false;
+  private pages: PaginationResult = new PaginationResult();
+
+  constructor(text: string, widthVp: number, fontSize: number, lineHeightVp: number,
+    pageHeightPx: number, firstPageHeightPx: number, utils: MeasureUtils | undefined,
+    metrics: PaginationMetrics) {
+    this.text = text;
+    this.widthVp = widthVp;
+    this.fontSize = fontSize;
+    this.lineHeightVp = lineHeightVp;
+    this.pageHeightPx = pageHeightPx > 0 ? pageHeightPx : 1;
+    this.firstPageHeightPx = firstPageHeightPx > 0 ? firstPageHeightPx : 1;
+    this.utils = utils;
+    this.metrics = metrics;
+  }
+
+  isFinished(): boolean {
+    return this.finished;
+  }
+
+  result(): PaginationResult {
+    return this.pages;
+  }
+
+  /** 推进最多 maxPages 页 */
+  step(maxPages: number): void {
+    if (this.finished) {
+      return;
+    }
+    const count = maxPages > 0 ? maxPages : 1;
+    for (let i = 0; i < count; i++) {
+      if (this.finished) {
+        return;
+      }
+      this.appendNextPage();
+    }
+  }
+
+  private appendNextPage(): void {
+    const text = this.text;
+    const start = this.cursor;
+    if (start >= text.length) {
+      if (this.pages.ranges.length === 0) {
+        this.pages.ranges.push(PageRange.of(0, 0));
+        this.pages.pageStarts.push(0);
+      }
+      this.finished = true;
+      return;
+    }
+    const heightPx = this.pages.ranges.length === 0 ? this.firstPageHeightPx : this.pageHeightPx;
+    const lineHeight = this.metrics.lineHeight > 0 ? this.metrics.lineHeight : 1;
+    let maxLines = Math.floor(heightPx / lineHeight);
+    if (maxLines < MIN_LINES_PER_PAGE) {
+      maxLines = MIN_LINES_PER_PAGE;
+    }
+    let end = TextPaginator.modelPageEnd(text, start, maxLines, this.metrics);
+    if (end <= start) {
+      end = start + 1;
+    }
+    if (end > text.length) {
+      end = text.length;
+    }
+    if (this.utils !== undefined) {
+      end = this.fitEnd(start, end, heightPx, maxLines);
+    }
+    if (end <= start) {
+      end = start + 1;
+    }
+    if (end > text.length) {
+      end = text.length;
+    }
+    this.pages.ranges.push(PageRange.of(start, end));
+    this.pages.pageStarts.push(start);
+    this.cursor = end;
+  }
+
+  /**
+   * 用实测高度校正模型推算的页尾：
+   * - 溢出：按比例回缩（高度对字符数近线性），一般 1~2 次收敛
+   * - 实测行数没占满 maxLines（模型把字宽算大了）：按模型补一行再实测确认
+   * 模型准确时每页只需 1 次测量。
+   */
+  private fitEnd(start: number, guess: number, heightPx: number, maxLines: number): number {
+    const utils = this.utils;
+    if (utils === undefined) {
+      return guess;
+    }
+    const text = this.text;
+    const lineHeight = this.metrics.lineHeight > 0 ? this.metrics.lineHeight : heightPx;
+    let end = guess;
+    let measured = TextPaginator.measureHeight(utils, text.substring(start, end),
+      this.widthVp, this.fontSize, this.lineHeightVp);
+    if (measured <= 0) {
+      return guess;
+    }
+    for (let i = 0; i < FIT_MAX_ITERATIONS; i++) {
+      if (measured > heightPx) {
+        const ratio = heightPx / measured;
+        let scaled = ratio > 0.98 ? 0.98 : ratio;
+        if (scaled < 0.2) {
+          scaled = 0.2;
+        }
+        let next = start + Math.floor((end - start) * scaled);
+        if (next >= end) {
+          next = end - 1;
+        }
+        if (next <= start) {
+          next = start + 1;
+        }
+        if (next > text.length) {
+          next = text.length;
+        }
+        end = next;
+        measured = TextPaginator.measureHeight(utils, text.substring(start, end),
+          this.widthVp, this.fontSize, this.lineHeightVp);
+        if (measured <= 0) {
+          return end;
+        }
+        continue;
+      }
+      const usedLines = Math.max(1, Math.round(measured / lineHeight));
+      if (usedLines >= maxLines || end >= text.length) {
+        break;
+      }
+      let next = TextPaginator.modelPageEnd(text, end, 1, this.metrics);
+      if (next <= end) {
+        next = end + 1;
+      }
+      if (next > text.length) {
+        next = text.length;
+      }
+      const extended = TextPaginator.measureHeight(utils, text.substring(start, next),
+        this.widthVp, this.fontSize, this.lineHeightVp);
+      if (extended <= 0 || extended > heightPx) {
+        break;
+      }
+      end = next;
+      measured = extended;
+    }
+    return end;
+  }
+}
 
 export class TextPaginator {
   /**
-   * 把整章文本切页。
+   * 创建增量分页游标。所有排版参数在创建时标定一次，之后 step() 只做模型推算 + 单页实测。
    * @param firstPageExtraHeight 首页被标题等元素占用的高度（vp），仅首页扣减
    */
-  static paginate(ui: UIContext, text: string, widthVp: number, heightVp: number,
-    fontSize: number, lineHeight: number, firstPageExtraHeight: number = 0): PaginationResult {
-    const result = new PaginationResult();
-    if (text.length === 0) {
-      result.ranges.push(PageRange.of(0, 0));
-      result.pageStarts.push(0);
-      return result;
-    }
+  static createSession(ui: UIContext, text: string, widthVp: number, heightVp: number,
+    fontSize: number, lineHeightVp: number, firstPageExtraHeight: number = 0): PaginationSession {
     const safeWidth = Math.max(1, widthVp);
     const safeHeight = Math.max(1, heightVp);
-    const extraHeight = firstPageExtraHeight > 0 ? firstPageExtraHeight : 0;
-    const utils = ui.getMeasureUtils();
+    const extra = firstPageExtraHeight > 0 ? firstPageExtraHeight : 0;
     let density = 1;
     try {
       density = display.getDefaultDisplaySync().densityPixels;
     } catch (e) {
       density = 1;
     }
+    if (!(density > 0)) {
+      density = 1;
+    }
+    // 启发式初值：全角字符按一个字号宽，半角取一半，行高用设置值
+    const metrics = new PaginationMetrics();
+    metrics.maxWidth = safeWidth * density;
+    metrics.lineHeight = Math.max(1, lineHeightVp * density);
+    metrics.cjkWidth = Math.max(1, fontSize * density);
+    metrics.asciiWidth = Math.max(0.5, metrics.cjkWidth * 0.5);
+    let utils: MeasureUtils | undefined = undefined;
+    try {
+      utils = ui.getMeasureUtils();
+    } catch (e) {
+      utils = undefined;
+    }
+    if (utils !== undefined) {
+      const measurable = TextPaginator.calibrate(utils, safeWidth, fontSize, lineHeightVp, density, metrics);
+      if (!measurable) {
+        // 测高都不可用：退回纯模型推算（不再逐页校验）
+        utils = undefined;
+      }
+    }
     const pageHeightPx = safeHeight * density;
-    const probe = TextPaginator.measureHeight(utils, '测试文本', safeWidth, fontSize, lineHeight);
-    if (probe <= 0) {
-      return TextPaginator.fallback(text, safeWidth, safeHeight, fontSize, lineHeight, extraHeight);
-    }
+    const firstHeightPx = Math.max(1, safeHeight - extra) * density;
+    return new PaginationSession(text, safeWidth, fontSize, lineHeightVp, pageHeightPx,
+      firstHeightPx, utils, metrics);
+  }
 
-    const charsPerLine = Math.max(1, Math.floor(safeWidth / Math.max(1, fontSize)));
-    const maxBack = charsPerLine * PAGE_BREAK_BACK_LINES;
-
-    let start = 0;
+  /** 一次性跑完分页（保持旧接口，供不需要分片的调用方使用） */
+  static paginate(ui: UIContext, text: string, widthVp: number, heightVp: number,
+    fontSize: number, lineHeight: number, firstPageExtraHeight: number = 0): PaginationResult {
+    const session = TextPaginator.createSession(ui, text, widthVp, heightVp, fontSize, lineHeight,
+      firstPageExtraHeight);
     let guard = 0;
-    while (start < text.length && guard < 20000) {
+    while (!session.isFinished() && guard < MAX_PAGE_GUARD) {
       guard++;
-      // 首页需要扣掉标题占用的高度
-      const pageHeight = result.ranges.length === 0
-        ? Math.max(1, pageHeightPx - extraHeight * density)
-        : pageHeightPx;
-      let maxEnd = Math.min(text.length, start + 2500);
-      let best = TextPaginator.measureEnd(utils, text, start, maxEnd, safeWidth, fontSize,
-        lineHeight, pageHeight);
-      if (best >= maxEnd && maxEnd < text.length) {
-        maxEnd = Math.min(text.length, start + 8000);
-        best = TextPaginator.measureEnd(utils, text, start, maxEnd, safeWidth, fontSize,
-          lineHeight, pageHeight);
-      }
-      if (best <= start) {
-        best = start + 1;
-      }
-      best = TextPaginator.preferNewline(text, start, best, maxBack);
-      result.ranges.push(PageRange.of(start, best));
-      result.pageStarts.push(start);
-      start = best;
+      session.step(FULL_STEP_PAGES);
     }
-    if (result.ranges.length === 0) {
-      result.ranges.push(PageRange.of(0, 0));
-      result.pageStarts.push(0);
-    }
-    return result;
+    return session.result();
   }
 
-  private static measureEnd(utils: MeasureUtils, text: string, start: number, maxEnd: number,
-    widthVp: number, fontSize: number, lineHeight: number, pageHeightPx: number): number {
-    let low = start + 1;
-    let high = maxEnd;
-    let best = start + 1;
-    while (low <= high) {
-      const mid = Math.floor((low + high) / 2);
-      const height = TextPaginator.measureHeight(utils, text.substring(start, mid), widthVp,
-        fontSize, lineHeight);
-      if (height > 0 && height <= pageHeightPx) {
-        best = mid;
-        low = mid + 1;
-      } else {
-        high = mid - 1;
+  /**
+   * 标定字宽与行高。返回测高是否可用（决定后续是否做单页校验）。
+   * 字宽探针失败时保留启发式值，只影响模型初值精度，不影响正确性。
+   */
+  private static calibrate(utils: MeasureUtils, widthVp: number, fontSize: number,
+    lineHeightVp: number, density: number, metrics: PaginationMetrics): boolean {
+    const rows: string[] = [];
+    let charsPerRow = Math.floor(widthVp / Math.max(1, fontSize));
+    if (charsPerRow > LINE_PROBE_CHARS) {
+      charsPerRow = LINE_PROBE_CHARS;
+    }
+    if (charsPerRow < 1) {
+      charsPerRow = 1;
+    }
+    let row = '';
+    for (let i = 0; i < charsPerRow; i++) {
+      row += '国';
+    }
+    for (let i = 0; i < LINE_PROBE_ROWS; i++) {
+      rows.push(row);
+    }
+    const emPx = Math.max(1, fontSize * density);
+    const lineProbe = rows.join('\n');
+    const probeHeight = TextPaginator.measureHeight(utils, lineProbe, widthVp, fontSize, lineHeightVp);
+    let measurable = false;
+    if (probeHeight > 0) {
+      measurable = true;
+      const derivedLineHeight = probeHeight / LINE_PROBE_ROWS;
+      const expectedLineHeight = Math.max(1, lineHeightVp * density);
+      // 探针意外换行或测量异常时保留设置值，避免行高被放大后每页行数被砍半
+      if (derivedLineHeight > expectedLineHeight * 0.7
+        && derivedLineHeight < expectedLineHeight * 1.8) {
+        metrics.lineHeight = derivedLineHeight;
       }
     }
-    return best;
+    let cjkProbe = '';
+    for (let i = 0; i < CJK_PROBE_COUNT; i++) {
+      cjkProbe += '国';
+    }
+    const cjkProbeWidth = TextPaginator.measureWidth(utils, cjkProbe, fontSize, lineHeightVp);
+    if (cjkProbeWidth > 0) {
+      const advance = cjkProbeWidth / CJK_PROBE_COUNT;
+      // 只接受合理量级（部分版本无约束测量会返回整行宽度），否则沿用启发式字号宽度
+      if (advance > emPx * 0.5 && advance < emPx * 2) {
+        metrics.cjkWidth = advance;
+      }
+    }
+    const asciiProbeWidth = TextPaginator.measureWidth(utils, ASCII_PROBE, fontSize, lineHeightVp);
+    if (asciiProbeWidth > 0) {
+      const advance = asciiProbeWidth / ASCII_PROBE.length;
+      if (advance > metrics.cjkWidth * 0.15 && advance < metrics.cjkWidth * 1.2) {
+        metrics.asciiWidth = advance;
+      }
+    }
+    if (metrics.cjkWidth <= 0) {
+      metrics.cjkWidth = emPx;
+    }
+    if (metrics.asciiWidth <= 0) {
+      metrics.asciiWidth = Math.max(0.5, metrics.cjkWidth * 0.5);
+    }
+    return measurable;
   }
 
-  private static measureHeight(utils: MeasureUtils, content: string, widthVp: number,
+  /**
+   * 按字符宽度模型推算一页的结束位置（不含超出行宽的字符）。
+   * 只做纯计算，不触发任何测量。
+   */
+  static modelPageEnd(text: string, start: number, maxLines: number, metrics: PaginationMetrics): number {
+    const maxWidth = metrics.maxWidth > 0 ? metrics.maxWidth : 1;
+    const cjkWidth = metrics.cjkWidth > 0 ? metrics.cjkWidth : 1;
+    const asciiWidth = metrics.asciiWidth > 0 ? metrics.asciiWidth : cjkWidth * 0.5;
+    const length = text.length;
+    let lines = 1;
+    let width = 0;
+    let i = start;
+    while (i < length) {
+      const code = text.charCodeAt(i);
+      if (code === 0x0A) {
+        i++;
+        width = 0;
+        if (i >= length) {
+          return i;
+        }
+        if (lines >= maxLines) {
+          // 换行符本身收尾本页最后一行
+          return i;
+        }
+        lines++;
+        continue;
+      }
+      let advance = cjkWidth;
+      if (code < 0x80) {
+        advance = code === 0x20 ? asciiWidth * 0.5 : asciiWidth;
+      }
+      if (width + advance > maxWidth && width > 0) {
+        if (lines >= maxLines) {
+          return i;
+        }
+        lines++;
+        width = 0;
+        continue;
+      }
+      width += advance;
+      i++;
+    }
+    return i;
+  }
+
+  /** 测高（px），失败返回 -1 */
+  static measureHeight(utils: MeasureUtils, content: string, widthVp: number,
     fontSize: number, lineHeight: number): number {
     try {
       const size: SizeOptions = utils.measureTextSize({
@@ -125,40 +393,27 @@ export class TextPaginator {
     }
   }
 
-  private static preferNewline(text: string, start: number, best: number, maxBack: number): number {
-    const floor = Math.max(start + 1, best - maxBack);
-    for (let i = best - 1; i >= floor; i--) {
-      if (text.charAt(i) === '\n') {
-        return i + 1;
+  /** 测自然宽度（px，不约束换行），失败返回 -1 */
+  static measureWidth(utils: MeasureUtils, content: string, fontSize: number,
+    lineHeight: number): number {
+    try {
+      const size: SizeOptions = utils.measureTextSize({
+        textContent: content,
+        fontSize: fontSize,
+        lineHeight: lineHeight
+      });
+      let width = 0;
+      if (typeof size.width === 'number') {
+        width = size.width;
+      } else {
+        width = Number.parseFloat(String(size.width));
       }
-    }
-    return best;
-  }
-
-  private static fallback(text: string, widthVp: number, heightVp: number,
-    fontSize: number, lineHeight: number, firstPageExtraHeight: number): PaginationResult {
-    const result = new PaginationResult();
-    const charsPerLine = Math.max(1, Math.floor(widthVp / Math.max(1, fontSize)));
-    const lineUnit = Math.max(1, lineHeight);
-    const linesPerPage = Math.max(1, Math.floor(heightVp / lineUnit));
-    const firstPageLines = Math.max(1, Math.floor(Math.max(0, heightVp - firstPageExtraHeight) / lineUnit));
-    const pageChars = Math.max(1, charsPerLine * linesPerPage);
-    const firstPageChars = Math.max(1, charsPerLine * firstPageLines);
-    let start = 0;
-    while (start < text.length) {
-      let end = Math.min(text.length, start + (result.ranges.length === 0 ? firstPageChars : pageChars));
-      end = TextPaginator.preferNewline(text, start, end, charsPerLine * PAGE_BREAK_BACK_LINES);
-      if (end <= start) {
-        end = start + 1;
+      if (!Number.isFinite(width) || width <= 0) {
+        return -1;
       }
-      result.ranges.push(PageRange.of(start, end));
-      result.pageStarts.push(start);
-      start = end;
+      return width;
+    } catch (e) {
+      return -1;
     }
-    if (result.ranges.length === 0) {
-      result.ranges.push(PageRange.of(0, 0));
-      result.pageStarts.push(0);
-    }
-    return result;
   }
 }

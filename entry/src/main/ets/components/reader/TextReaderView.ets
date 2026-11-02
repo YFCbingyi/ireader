@@ -19,10 +19,14 @@ const TITLE_GAP = 16;
 const CHUNK_CHARS = 600;
 const CHUNK_NEWLINE_SLACK = 160;
 const PAGE_CACHE_LIMIT = 6;
-// 左右分页：初始窗口前后各 1 章；距端部不足 2 页时补章；窗口章数上限
-const PAGE_WINDOW_RADIUS = 1;
+// 左右分页：距端部不足 2 页时补章；窗口章数上限
 const PAGE_WINDOW_MAX_CHAPTERS = 5;
 const PAGE_LOAD_AHEAD = 2;
+// 分页分片：每片最多推进多少页，片间让出主线程，长章节打开时界面不白屏卡死
+const PAGINATE_SLICE_PAGES = 20;
+// 首屏出字后预热相邻章分页缓存的延迟（避开首帧布局）
+const PAGE_PREFETCH_NEXT_DELAY = 220;
+const PAGE_PREFETCH_PREV_DELAY = 560;
 // 点击分区：两侧 30% 翻页（左右模式翻页 / 上下模式翻屏），中间 40% 唤起控制栏
 const TAP_SIDE_RATIO = 0.3;
 // 上下模式点击翻屏只滚可视高度的 90%，保留少量重叠便于衔接上下文
@@ -433,6 +437,8 @@ export struct TextReaderView {
   private loadingPageChapters: Set<number> = new Set();
   // 页窗口重建序号，避免异步分页结果错位
   private pageSeq: number = 0;
+  // 排版代次：字号 / 行距 / 视口尺寸变化时递增，用于作废进行中的增量分页
+  private layoutEpoch: number = 0;
   private chapterLengths: Map<number, number> = new Map();
   private pagedReady: boolean = false;
   // 数据源重建 / 索引补偿期间抑制 onChange 的进度误报（结构变化会让 Swiper 先跳到 0 或旧索引）
@@ -583,6 +589,8 @@ export struct TextReaderView {
   private onConfigChanged(): void {
     this.pageCache.clear();
     this.pageCacheKeys = [];
+    // 排版参数变了，进行中的分页结果全部作废
+    this.layoutEpoch++;
     if (this.mode === ReadingMode.VERTICAL) {
       this.initWindow(this.currentChapter, this.currentCharOffset);
     } else {
@@ -979,13 +987,20 @@ export struct TextReaderView {
     }, 48);
   }
 
-  /** 以 targetChapter + charOffset 为中心重建页窗口（当前章 ±1），并做无动画定位 */
+  /**
+   * 以 targetChapter + charOffset 为中心重建页窗口，并做无动画定位。
+   *
+   * 只先排当前章：长章节（几万字、上百页）不必等前后章一起排完就能出首屏，
+   * 前后章交给 ensurePageWindow 在翻到端部时按需补，或由 prefetchNeighborPages 预热缓存。
+   */
   private async initPageWindow(targetChapter: number, charOffset: number): Promise<void> {
     if (this.lastWidth <= 0 || this.lastHeight <= 0 || this.chapterCount <= 0) {
       return;
     }
     this.pageSeq++;
     const seq = this.pageSeq;
+    // 新窗口开始：进行中的分页（旧窗口 / 旧参数）全部作废
+    this.layoutEpoch++;
     let center = targetChapter;
     if (center < 0) {
       center = 0;
@@ -993,31 +1008,13 @@ export struct TextReaderView {
     if (center >= this.chapterCount) {
       center = this.chapterCount - 1;
     }
-    let start = center - PAGE_WINDOW_RADIUS;
-    if (start < 0) {
-      start = 0;
-    }
-    let end = center + PAGE_WINDOW_RADIUS;
-    if (end > this.chapterCount - 1) {
-      end = this.chapterCount - 1;
-    }
-    const tasks: Promise<PagedItem[]>[] = [];
-    for (let c = start; c <= end; c++) {
-      tasks.push(this.pagesOfChapterAsync(c));
-    }
-    const lists = await Promise.all(tasks);
-    if (seq !== this.pageSeq) {
+    const t0 = Date.now();
+    const items = await this.pagesOfChapterAsync(center);
+    if (seq !== this.pageSeq || items.length === 0) {
       return;
     }
-    const items: PagedItem[] = [];
-    for (let i = 0; i < lists.length; i++) {
-      const list = lists[i];
-      for (let j = 0; j < list.length; j++) {
-        items.push(list[j]);
-      }
-    }
-    this.pageWindowStart = start;
-    this.pageWindowEnd = end;
+    this.pageWindowStart = center;
+    this.pageWindowEnd = center;
     this.loadingPageChapters.clear();
     this.beginPageSync();
     this.pageSource.reset(items);
@@ -1030,11 +1027,41 @@ export struct TextReaderView {
     this.updatePagedRatio(center, charOffset);
     this.restorePage();
     this.reportCurrent();
-    hilog.info(DOMAIN, TAG, 'initPageWindow center=%{public}d window=[%{public}d,%{public}d] pages=%{public}d',
-      center, start, end, items.length);
+    hilog.info(DOMAIN, TAG, 'initPageWindow center=%{public}d pages=%{public}d cost=%{public}dms',
+      center, items.length, Date.now() - t0);
+    this.prefetchNeighborPages(center, seq);
   }
 
-  /** 取某章的页（命中缓存直接复用）；排版参数变化后自动重算并写回缓存 */
+  /** 首屏出字后预热前后章的分页缓存，翻到章末时不必现场排版 */
+  private prefetchNeighborPages(center: number, seq: number): void {
+    const next = center + 1;
+    if (next < this.chapterCount) {
+      setTimeout(() => {
+        if (seq !== this.pageSeq) {
+          return;
+        }
+        this.pagesOfChapterAsync(next).catch(() => {
+        });
+      }, PAGE_PREFETCH_NEXT_DELAY);
+    }
+    const prev = center - 1;
+    if (prev >= 0) {
+      setTimeout(() => {
+        if (seq !== this.pageSeq) {
+          return;
+        }
+        this.pagesOfChapterAsync(prev).catch(() => {
+        });
+      }, PAGE_PREFETCH_PREV_DELAY);
+    }
+  }
+
+  /**
+   * 取某章的页（命中缓存直接复用）；排版参数变化后自动重算并写回缓存。
+   *
+   * 分页按片推进并让出主线程（见 PAGINATE_SLICE_PAGES），
+   * 排版代次（layoutEpoch）变化时中途放弃，返回空数组由调用方忽略。
+   */
   private async pagesOfChapterAsync(chapter: number): Promise<PagedItem[]> {
     const width = this.contentWidth();
     const height = this.pageContentHeight();
@@ -1046,10 +1073,26 @@ export struct TextReaderView {
       this.touchPageCache(chapter);
       return cached.items;
     }
+    const epoch = this.layoutEpoch;
+    const t0 = Date.now();
     const text = await this.chapterTextAsync(chapter);
+    if (epoch !== this.layoutEpoch) {
+      return [];
+    }
     this.chapterLengths.set(chapter, text.length);
-    const result = TextPaginator.paginate(this.getUIContext(), text, width, height,
+    const session = TextPaginator.createSession(this.getUIContext(), text, width, height,
       this.fontSize, this.lineHeightValue(), titleExtra);
+    while (!session.isFinished()) {
+      session.step(PAGINATE_SLICE_PAGES);
+      if (session.isFinished()) {
+        break;
+      }
+      await TextReaderView.yieldToUi();
+      if (epoch !== this.layoutEpoch) {
+        return [];
+      }
+    }
+    const result = session.result();
     const items: PagedItem[] = [];
     for (let i = 0; i < result.ranges.length; i++) {
       const range = result.ranges[i];
@@ -1059,8 +1102,18 @@ export struct TextReaderView {
       items.push(PagedItem.of(chapter, 0, '', 0));
     }
     this.putPageCache(chapter, key, items);
-    hilog.debug(DOMAIN, TAG, 'paginate chapter=%{public}d pages=%{public}d', chapter, items.length);
+    hilog.info(DOMAIN, TAG, 'paginate chapter=%{public}d pages=%{public}d chars=%{public}d cost=%{public}dms',
+      chapter, items.length, text.length, Date.now() - t0);
     return items;
+  }
+
+  /** 让出主线程一拍，供分片分页之间插入（保持渲染与触摸响应） */
+  private static yieldToUi(): Promise<void> {
+    return new Promise<void>((resolve: () => void) => {
+      setTimeout(() => {
+        resolve();
+      }, 0);
+    });
   }
 
   private chapterTextAsync(chapter: number): Promise<string> {
@@ -1180,8 +1233,8 @@ export struct TextReaderView {
     this.loadingPageChapters.add(chapter);
     const items = await this.pagesOfChapterAsync(chapter);
     this.loadingPageChapters.delete(chapter);
-    // 异步期间窗口可能已被重建，校验后再插入
-    if (chapter !== this.pageWindowEnd + 1) {
+    // 异步期间窗口可能已被重建，校验后再插入；分页被作废时返回空数组
+    if (chapter !== this.pageWindowEnd + 1 || items.length === 0) {
       return;
     }
     this.pageSource.appendChapter(items);
@@ -1201,7 +1254,7 @@ export struct TextReaderView {
     this.loadingPageChapters.add(chapter);
     const items = await this.pagesOfChapterAsync(chapter);
     this.loadingPageChapters.delete(chapter);
-    if (chapter !== this.pageWindowStart - 1) {
+    if (chapter !== this.pageWindowStart - 1 || items.length === 0) {
       return;
     }
     const before = this.currentPage;

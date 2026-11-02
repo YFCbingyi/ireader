@@ -22,7 +22,7 @@
 | 持久化 | 沙箱 JSON 文件（无 Preferences、无数据库） |
 | 文本解码 | `TextCodec`（BOM / UTF-8 / GBK 探测） |
 | 大文件解析 | `taskpool` + `@Concurrent`（`TxtImportTask`） |
-| 分页测量 | `UIContext.getMeasureUtils().measureTextSize` 二分测高 |
+| 分页测量 | `UIContext.getMeasureUtils().measureTextSize`：探针标定字宽/行高 + 字宽模型推算页边界 + 单页实测校验 |
 | 第三方依赖 | 无 |
 
 ArkTS 硬约束（踩过的坑）：
@@ -48,7 +48,7 @@ entry/src/main/ets/
 │   ├── ImportService.ets     # importTxt（走 taskpool）/ importZip（解压 + 扫描）
 │   ├── TxtImportTask.ets     # @Concurrent 解析任务：读盘 → 解码 → 切分 → 逐章写盘 → 返回 JSON
 │   ├── TextCodec.ets         # 编码识别 + 章节切分（decode / normalize / splitChapters）
-│   ├── TextPaginator.ets     # 单章分页（measureTextSize 二分测高 + 换行回退）
+│   ├── TextPaginator.ets     # 单章分页（PaginationSession 可分批推进：探针标定 + 字宽模型 + 单页校验）
 │   ├── ImageMetaReader.ets   # 读取图片宽高，产出 ImageEntry
 │   ├── LibraryStore.ets      # 书架/清单/设置/书签的 JSON 读写
 │   ├── ReadingStatsStore.ets # 阅读时长累计
@@ -246,14 +246,16 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 
 | 常量 | 值 | 含义 |
 |---|---|---|
-| `PAGE_WINDOW_RADIUS` | 1 | 初始窗口 = 当前章 ± 1 |
 | `PAGE_WINDOW_MAX_CHAPTERS` | 5 | 窗口章数上限 |
 | `PAGE_LOAD_AHEAD` | 2 | 距窗口两端不足 2 页时补章 |
 | `PAGE_CACHE_LIMIT` | 6 | 章级分页缓存上限（LRU） |
+| `PAGINATE_SLICE_PAGES` | 20 | 分页分片：每片最多推进 20 页，片间让出主线程 |
+| `PAGE_PREFETCH_NEXT_DELAY` / `PAGE_PREFETCH_PREV_DELAY` | 220 / 560 | 首屏出字后预热相邻章分页缓存的延迟（ms） |
 
 - **数据源** `PagedSource`：`reset` / `appendChapter` / `prependChapter` / `removeHeadChapter` / `removeTailChapter` / `chapterStartIndex` / `itemAt`。
-- **建窗** `initPageWindow(center, charOffset)`：`Promise.all` 并发对 `center-1..center+1` 分页 → 扁平拼接 → `reset` → `findPageIndex` → `changeIndex(index, false)` 无动画落位 → `reportCurrent()`。
-- **分页缓存** `pagesOfChapterAsync(chapter)`：缓存键 = `宽 x 高 | fontSize | lineHeightRatio | titleExtra`，命中直接复用该章 `PagedItem[]`，未命中才 `chapterTextProvider` 取文 + `TextPaginator.paginate`。
+- **建窗** `initPageWindow(center, charOffset)`：**只排当前章**（长章节几万字/上百页也不等前后章）→ `reset` → `findPageIndex` → `changeIndex(index, false)` 无动画落位 → `reportCurrent()`；随后 `prefetchNeighborPages()` 延迟预热 `center±1` 的分页缓存，翻到章末时 `appendNextChapter` 直接命中缓存。
+- **分页缓存** `pagesOfChapterAsync(chapter)`：缓存键 = `宽 x 高 | fontSize | lineHeightRatio | titleExtra`，命中直接复用该章 `PagedItem[]`，未命中才 `chapterTextProvider` 取文 + `TextPaginator.createSession()` 分批推进。
+- **可分页作废**：`layoutEpoch` 在字号 / 行距变化、以及每次建窗时递增；`pagesOfChapterAsync` 每片校验一次，代次变了立即返回空数组，调用方（建窗 / 补章）丢弃结果，避免旧参数的结果污染新窗口。
 - **补章**：`ensurePageWindow(index)` 判距两端页数，`appendNextChapter` 不影响索引；`prependPrevChapter` 前插后 `currentPage += added` 并 `changeIndex(..., false)` 补偿。
 - **回收**：超 5 章时回收离当前章更远的一端，回收头部时 `currentPage -= removed` 并补偿。
 - **误报抑制**：任何结构变更（reset / prepend / 头部回收）前调 `beginPageSync()`，48ms 内 `handlePageChange` 只同步索引、不上报进度、不触发窗口维护。这是"翻一页跳两页"的唯一防线。
@@ -297,10 +299,16 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 | 竖排常驻章 | `WINDOW_MAX_CHAPTERS = 8` 章块 |
 | 左右常驻章 | `PAGE_WINDOW_MAX_CHAPTERS = 5` 章页 + 6 章分页缓存 |
 | 章节全文缓存 | 12 章 × ≤ 40 万字符 |
-| 单章分页成本 | `measureTextSize` 二分，页数 × log(候选长度)；`guard` 上限 20000 页 |
+| 单章分页成本 | 标定 3 次探针 + 每页 1 次 `measureTextSize`（文本长度≈一页）；8 万字 ≈ 220 次测量 / 8 万字符，旧二分法为 ≈2600 次 / 210 万字符 |
 | 图片书常驻章 | 竖排 8 章 / 左右 5 章（仅元数据 + uri，不解码位图） |
 
-分页只在窗口端部发生，单次 1 章；补章不阻塞主线程（`await` 取文 + 同步测量）。
+分页只在建窗与窗口端部发生，单次 1 章；分页按 `PAGINATE_SLICE_PAGES` 分片推进，片间 `setTimeout(0)` 让出主线程，长章节不会一次性占满 UI 线程。
+
+分页算法（`TextPaginator`）：
+
+1. **标定**（每章 3 次测量）：多行样本测实际行高、无约束样本测全角/半角字符步进，并做量级合理性校验（异常时退回「全角=1em、半角=0.5em、行高=设置值」）。
+2. **推页**：按字符宽度模型逐字符累加行宽（`\n` 强制换行），推到本页行数上限即得页尾，纯计算不测量。
+3. **校验**：对模型页尾测一次高度（≈一页长度）；溢出按比例回缩、行数没占满则按模型补一行再实测，通常每页只需 1 次测量。
 
 ## 13. 已知取舍
 
@@ -323,7 +331,7 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 **P1 · 性能**
 
 4. 导入改为流式：`readUriBytes` 一次性读全文件，10MB 峰值内存 ≈ 20MB（bytes + string）。可按 1MB 分块解码 + 增量切分。
-5. 分页测量缓存字符宽度表，替代每页二分（当前每页 10+ 次 `measureTextSize`）。
+5. ~~分页测量缓存字符宽度表，替代每页二分~~ 已实现：探针标定 + 字宽模型 + 单页校验（见 §8.2、§12）；后续可把分页结果按 `宽高|字号|行距` 落盘缓存，跨会话复用。
 6. `chapterTextCache` 按字节预算而非章数淘汰，长章书可避免 12×40 万字符的极端占用。
 7. 补章做优先级队列：用户滚动方向优先，避免前后同时读盘争 IO。
 
