@@ -1,6 +1,6 @@
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { window } from '@kit.ArkUI';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import {
   BookManifest,
@@ -14,8 +14,10 @@ import {
   ReadingMode,
   ReadingProgress
 } from '../model/BookModels';
+import { Annotation, AnnotationKind } from '../model/Annotation';
 import { AppPaths } from '../utils/AppPaths';
 import { FileUtil } from '../utils/FileUtil';
+import { AnnotationStore } from '../service/AnnotationStore';
 import { LibraryStore } from '../service/LibraryStore';
 import { ReadingStatsStore } from '../service/ReadingStatsStore';
 import { ReaderTheme, ReaderThemeColors, ReadingTheme } from '../model/ReaderTheme';
@@ -28,6 +30,8 @@ const CHAPTER_CACHE_LIMIT = 12;
 const CHAPTER_CACHE_MAX_CHARS = 400000;
 const DOMAIN = 0x0006;
 const TAG = 'Reader';
+// 空标注列表：避免每次渲染都新建数组
+const EMPTY_ANNOTATIONS: Annotation[] = [];
 
 @Entry
 @Component
@@ -63,6 +67,20 @@ struct Reader {
   @State bookmarked: boolean = false;
   @State theme: ReadingTheme = ReadingTheme.EYE;
   @State palette: ReaderThemeColors = ReaderTheme.eye();
+  // 划线 / 想法
+  @State annotations: Annotation[] = [];
+  @State annotationsVersion: number = 0;
+  @State noteVisible: boolean = false;
+  @State noteDraft: string = '';
+  @State noteQuote: string = '';
+  @State noteExistingId: string = '';
+  // 词典卡片：先展示选中的词，由用户决定复制还是去浏览器查
+  @State dictVisible: boolean = false;
+  @State dictWord: string = '';
+  private noteChapter: number = 0;
+  private noteStart: number = 0;
+  private noteEnd: number = 0;
+  private annotationIndex: Map<number, Annotation[]> = new Map();
   @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
     ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
 
@@ -116,6 +134,8 @@ struct Reader {
       : this.settings.imageReadingMode;
     this.manifest = LibraryStore.getManifest(this.bookId);
     this.bookmarks = LibraryStore.getBookmarks(this.bookId);
+    this.annotations = AnnotationStore.load(this.bookId);
+    this.rebuildAnnotationIndex();
     if (this.manifest.chapters.length === 0) {
       this.errorText = '书籍内容为空';
       this.loading = false;
@@ -182,6 +202,14 @@ struct Reader {
   }
 
   onBackPress(): boolean {
+    if (this.dictVisible) {
+      this.dictVisible = false;
+      return true;
+    }
+    if (this.noteVisible) {
+      this.noteVisible = false;
+      return true;
+    }
     if (this.panel.length > 0) {
       this.panel = '';
       return true;
@@ -669,6 +697,162 @@ struct Reader {
     this.updateBookmarkState();
   }
 
+  // ================= 划线 / 想法 =================
+
+  /** 按章分组，渲染层按章取标注（避免每次渲染线性扫描全书标注） */
+  private rebuildAnnotationIndex(): void {
+    this.annotationIndex.clear();
+    for (let i = 0; i < this.annotations.length; i++) {
+      const item = this.annotations[i];
+      let list = this.annotationIndex.get(item.chapterIndex);
+      if (list === undefined) {
+        list = [];
+        this.annotationIndex.set(item.chapterIndex, list);
+      }
+      list.push(item);
+    }
+  }
+
+  private annotationsOf(chapter: number): Annotation[] {
+    const list = this.annotationIndex.get(chapter);
+    return list !== undefined ? list : EMPTY_ANNOTATIONS;
+  }
+
+  private persistAnnotations(): void {
+    this.rebuildAnnotationIndex();
+    this.annotationsVersion++;
+    AnnotationStore.save(this.bookId, this.annotations);
+  }
+
+  /** 划线开关：选区已有标注就取消，否则新增一条高亮 */
+  private toggleHighlight(chapter: number, start: number, end: number, text: string): void {
+    const existing = AnnotationStore.findAt(this.annotations, chapter, start, end);
+    if (existing !== undefined) {
+      if (existing.kind === AnnotationKind.NOTE) {
+        // 带想法的划线不在这里删，避免误删笔记
+        this.toast('该段已有想法，可在“想法”里编辑或删除');
+        return;
+      }
+      this.annotations = AnnotationStore.removeById(this.annotations, existing.id);
+      this.persistAnnotations();
+      this.toast('已取消划线');
+      return;
+    }
+    const item = Annotation.of(chapter, start, end, text, '', AnnotationKind.HIGHLIGHT);
+    const next: Annotation[] = this.annotations.slice();
+    next.push(item);
+    AnnotationStore.sort(next);
+    this.annotations = next;
+    this.persistAnnotations();
+    this.toast('已划线');
+  }
+
+  /** 记录 / 编辑想法：选区已有标注时进入编辑态 */
+  private openNoteEditor(chapter: number, start: number, end: number, text: string): void {
+    const existing = AnnotationStore.findAt(this.annotations, chapter, start, end);
+    this.noteChapter = chapter;
+    this.noteStart = existing !== undefined ? existing.start : start;
+    this.noteEnd = existing !== undefined ? existing.end : end;
+    this.noteQuote = existing !== undefined && existing.text.length > 0 ? existing.text : text;
+    this.noteExistingId = existing !== undefined ? existing.id : '';
+    this.noteDraft = existing !== undefined ? existing.note : '';
+    this.noteVisible = true;
+  }
+
+  private saveNote(): void {
+    const note = this.noteDraft.trim();
+    if (this.noteExistingId.length > 0) {
+      const next: Annotation[] = [];
+      for (let i = 0; i < this.annotations.length; i++) {
+        const item = this.annotations[i];
+        if (item.id === this.noteExistingId) {
+          item.note = note;
+          item.start = this.noteStart;
+          item.end = this.noteEnd;
+          item.kind = AnnotationKind.NOTE;
+          item.updatedAt = Date.now();
+        }
+        next.push(item);
+      }
+      this.annotations = next;
+      this.persistAnnotations();
+    } else {
+      const item = Annotation.of(this.noteChapter, this.noteStart, this.noteEnd, this.noteQuote, note,
+        AnnotationKind.NOTE);
+      const next: Annotation[] = this.annotations.slice();
+      next.push(item);
+      AnnotationStore.sort(next);
+      this.annotations = next;
+      this.persistAnnotations();
+    }
+    this.noteVisible = false;
+    this.toast(note.length > 0 ? '已保存想法' : '已划线');
+  }
+
+  private deleteNote(): void {
+    if (this.noteExistingId.length > 0) {
+      this.annotations = AnnotationStore.removeById(this.annotations, this.noteExistingId);
+      this.persistAnnotations();
+      this.toast('已删除');
+    }
+    this.noteVisible = false;
+  }
+
+  private jumpToAnnotation(annotation: Annotation): void {
+    this.panel = '';
+    this.openChapter(annotation.chapterIndex, annotation.start, 0, 0, true);
+  }
+
+  private deleteAnnotation(annotation: Annotation): void {
+    this.annotations = AnnotationStore.removeById(this.annotations, annotation.id);
+    this.persistAnnotations();
+    this.toast('已删除');
+  }
+
+  /**
+   * 词典：先弹卡片展示选中的词，复制或去浏览器查由用户决定。
+   * 本机没有系统词典应用，也没有离线词典 API，不直接跳浏览器（会打断阅读）。
+   */
+  private lookupWord(word: string): void {
+    const query = word.trim();
+    if (query.length === 0) {
+      return;
+    }
+    this.dictWord = query.length > 60 ? query.substring(0, 60) : query;
+    this.dictVisible = true;
+  }
+
+  private copyDictWord(): void {
+    try {
+      const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.dictWord);
+      pasteboard.getSystemPasteboard().setData(data).then(() => {
+        this.toast('已复制');
+      }).catch(() => {
+        this.toast('复制失败');
+      });
+    } catch (e) {
+      const err = e as BusinessError;
+      console.error(`copy failed: ${err.message}`);
+      this.toast('复制失败');
+    }
+  }
+
+  private openDictInBrowser(): void {
+    let query = this.dictWord;
+    if (query.length > 40) {
+      query = query.substring(0, 40);
+    }
+    const url = `https://cn.bing.com/dict/search?q=${encodeURIComponent(query)}`;
+    try {
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      context.openLink(url).catch(() => {
+        this.toast('没有可用的浏览器');
+      });
+    } catch (e) {
+      this.toast('没有可用的浏览器');
+    }
+  }
+
   /**
    * 切换阅读方向。配置按书类型统一：同类型的所有书共用一套方向，另一类型不受影响。
    * 当前这本书立即生效，其余同类书在下次打开时生效。
@@ -806,6 +990,169 @@ struct Reader {
     .backgroundColor(this.pageBackground())
   }
 
+  /** 想法编辑面板：底部弹出，保存后立即在正文回显下划线 */
+  @Builder
+  noteEditor() {
+    Stack({ alignContent: Alignment.Bottom }) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#66000000')
+        .onClick(() => {
+          this.noteVisible = false;
+        })
+
+      Column() {
+        Row() {
+          Text(this.noteExistingId.length > 0 ? '编辑想法' : '记录想法')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(this.palette.panelText)
+            .layoutWeight(1)
+          Text('关闭')
+            .fontSize(14)
+            .fontColor(this.palette.accent)
+            .padding({ left: 12, top: 6, bottom: 6 })
+            .onClick(() => {
+              this.noteVisible = false;
+            })
+        }
+        .width('100%')
+        .height(48)
+        .alignItems(VerticalAlign.Center)
+
+        Text(this.noteQuote)
+          .width('100%')
+          .fontSize(13)
+          .fontColor(this.palette.panelSubText)
+          .lineHeight(20)
+          .maxLines(3)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .padding(10)
+          .backgroundColor(this.palette.chipBg)
+          .borderRadius(8)
+
+        TextArea({ text: this.noteDraft, placeholder: '写下你的想法…' })
+          .width('100%')
+          .height(130)
+          .fontSize(15)
+          .fontColor(this.palette.panelText)
+          .placeholderColor(this.palette.panelSubText)
+          .backgroundColor('#00000000')
+          .margin({ top: 10 })
+          .onChange((value: string) => {
+            this.noteDraft = value;
+          })
+
+        Row() {
+          if (this.noteExistingId.length > 0) {
+            Text('删除')
+              .fontSize(14)
+              .fontColor(this.palette.danger)
+              .padding({ top: 10, bottom: 10, right: 20 })
+              .onClick(() => {
+                this.deleteNote();
+              })
+          }
+          Blank()
+          Button('保存')
+            .type(ButtonType.Capsule)
+            .backgroundColor(this.palette.accent)
+            .fontColor(this.palette.accentText)
+            .fontSize(14)
+            .onClick(() => {
+              this.saveNote();
+            })
+        }
+        .width('100%')
+        .margin({ top: 6 })
+      }
+      .width('100%')
+      .backgroundColor(this.palette.panelBg)
+      .borderRadius({ topLeft: 20, topRight: 20 })
+      .padding({ left: 18, right: 18, bottom: 22 })
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  /** 词典卡片：展示选中的词，复制或去浏览器查 */
+  @Builder
+  dictCard() {
+    Stack({ alignContent: Alignment.Bottom }) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#66000000')
+        .onClick(() => {
+          this.dictVisible = false;
+        })
+
+      Column() {
+        Row() {
+          Text('词典')
+            .fontSize(17)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(this.palette.panelText)
+            .layoutWeight(1)
+          Text('关闭')
+            .fontSize(14)
+            .fontColor(this.palette.accent)
+            .padding({ left: 12, top: 6, bottom: 6 })
+            .onClick(() => {
+              this.dictVisible = false;
+            })
+        }
+        .width('100%')
+        .height(48)
+        .alignItems(VerticalAlign.Center)
+
+        Text(this.dictWord)
+          .width('100%')
+          .fontSize(20)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.palette.panelText)
+          .maxLines(3)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .margin({ top: 4, bottom: 10 })
+
+        Text('本机没有离线词典，可复制后到词典 App 里查，或用浏览器打开在线词典。')
+          .width('100%')
+          .fontSize(12)
+          .fontColor(this.palette.panelSubText)
+          .lineHeight(18)
+          .margin({ bottom: 16 })
+
+        Row() {
+          Button('复制')
+            .type(ButtonType.Capsule)
+            .backgroundColor(this.palette.chipBg)
+            .fontColor(this.palette.chipText)
+            .fontSize(14)
+            .onClick(() => {
+              this.copyDictWord();
+            })
+          Blank()
+          Button('浏览器查词典')
+            .type(ButtonType.Capsule)
+            .backgroundColor(this.palette.accent)
+            .fontColor(this.palette.accentText)
+            .fontSize(14)
+            .onClick(() => {
+              this.openDictInBrowser();
+            })
+        }
+        .width('100%')
+      }
+      .width('100%')
+      .backgroundColor(this.palette.panelBg)
+      .borderRadius({ topLeft: 20, topRight: 20 })
+      .padding({ left: 18, right: 18, top: 0, bottom: 22 })
+    }
+    .width('100%')
+    .height('100%')
+  }
+
   build() {
     Stack() {
       if (this.loading) {
@@ -838,6 +1185,21 @@ struct Reader {
           accentColor: this.palette.accent,
           accentTextColor: this.palette.accentText,
           controlsVisible: this.controlsVisible,
+          annotationsVersion: this.annotationsVersion,
+          annotationBg: this.palette.annotationBg,
+          annotationLine: this.palette.annotationLine,
+          annotationsOf: (index: number): Annotation[] => {
+            return this.annotationsOf(index);
+          },
+          onToggleHighlight: (chapter: number, start: number, end: number, text: string): void => {
+            this.toggleHighlight(chapter, start, end, text);
+          },
+          onRequestNote: (chapter: number, start: number, end: number, text: string): void => {
+            this.openNoteEditor(chapter, start, end, text);
+          },
+          onLookup: (word: string): void => {
+            this.lookupWord(word);
+          },
           onProgress: (chapterIndex: number, charOffset: number, ratio: number): void => {
             this.onTextProgress(chapterIndex, charOffset, ratio);
           },
@@ -964,6 +1326,15 @@ struct Reader {
               .onClick(() => {
                 this.openPanel('bookmarks');
               })
+            if (this.book.type === BookType.TEXT) {
+              Text('笔记')
+                .fontSize(13)
+                .fontColor(this.barTextColor())
+                .padding({ top: 10, bottom: 10 })
+                .onClick(() => {
+                  this.openPanel('notes');
+                })
+            }
             Text('设置')
               .fontSize(13)
               .fontColor(this.barTextColor())
@@ -999,6 +1370,7 @@ struct Reader {
           chapters: this.manifest.chapters,
           currentChapter: this.chapterIndex,
           bookmarks: this.bookmarks,
+          annotations: this.annotations,
           isImageBook: this.book.type === BookType.IMAGE,
           readingMode: this.readingMode,
           fontSize: this.fontSize,
@@ -1017,6 +1389,12 @@ struct Reader {
           onDeleteBookmark: (bookmark: Bookmark): void => {
             this.deleteBookmark(bookmark);
           },
+          onSelectAnnotation: (annotation: Annotation): void => {
+            this.jumpToAnnotation(annotation);
+          },
+          onDeleteAnnotation: (annotation: Annotation): void => {
+            this.deleteAnnotation(annotation);
+          },
           onModeChange: (mode: ReadingMode): void => {
             this.changeMode(mode);
           },
@@ -1030,6 +1408,14 @@ struct Reader {
             this.changeTheme(theme);
           }
         })
+      }
+
+      if (this.noteVisible && !this.loading && this.errorText.length === 0) {
+        this.noteEditor()
+      }
+
+      if (this.dictVisible && !this.loading && this.errorText.length === 0) {
+        this.dictCard()
       }
     }
     .width('100%')

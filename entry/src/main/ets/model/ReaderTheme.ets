@@ -21,6 +21,9 @@ export class ReaderThemeColors {
   chipText: string = '#5C4A32';
   selectedItemBg: string = '#F0E4D0';
   danger: string = '#B85C5C';
+  // 划线底色（半透明琥珀，浅底深底都可读）与想法下划线颜色
+  annotationBg: string = '#40E8B339';
+  annotationLine: string = '#C08A22';
 }
 
 export class ReaderTheme {
@@ -54,6 +57,8 @@ export class ReaderTheme {
     colors.chipText = '#3A4A3F';
     colors.selectedItemBg = '#B3D2BC';
     colors.danger = '#A8474B';
+    colors.annotationBg = '#4DE0B84D';
+    colors.annotationLine = '#9A6B10';
     return colors;
   }
 
@@ -94,6 +99,8 @@ export class ReaderTheme {
     colors.chipText = '#D5D5D5';
     colors.selectedItemBg = '#2A2418';
     colors.danger = '#D97A7A';
+    colors.annotationBg = '#4DFFC107';
+    colors.annotationLine = '#E8BC46';
     return colors;
   }
 
