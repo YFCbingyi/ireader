@@ -1,4 +1,4 @@
-import { display, MeasureUtils, UIContext } from '@kit.ArkUI';
+import { display, MeasureOptions, MeasureUtils, UIContext } from '@kit.ArkUI';
 
 export class PageRange {
   start: number = 0;
@@ -59,13 +59,14 @@ export class PaginationSession {
   private firstPageHeightPx: number = 1;
   private utils: MeasureUtils | undefined = undefined;
   private metrics: PaginationMetrics = new PaginationMetrics();
+  private fontFamily: string = '';
   private cursor: number = 0;
   private finished: boolean = false;
   private pages: PaginationResult = new PaginationResult();
 
   constructor(text: string, widthVp: number, fontSize: number, lineHeightVp: number,
     pageHeightPx: number, firstPageHeightPx: number, utils: MeasureUtils | undefined,
-    metrics: PaginationMetrics) {
+    metrics: PaginationMetrics, fontFamily: string = '') {
     this.text = text;
     this.widthVp = widthVp;
     this.fontSize = fontSize;
@@ -74,6 +75,7 @@ export class PaginationSession {
     this.firstPageHeightPx = firstPageHeightPx > 0 ? firstPageHeightPx : 1;
     this.utils = utils;
     this.metrics = metrics;
+    this.fontFamily = fontFamily;
   }
 
   isFinished(): boolean {
@@ -151,7 +153,7 @@ export class PaginationSession {
     const lineHeight = this.metrics.lineHeight > 0 ? this.metrics.lineHeight : heightPx;
     let end = guess;
     let measured = TextPaginator.measureHeight(utils, text.substring(start, end),
-      this.widthVp, this.fontSize, this.lineHeightVp);
+      this.widthVp, this.fontSize, this.lineHeightVp, this.fontFamily);
     if (measured <= 0) {
       return guess;
     }
@@ -174,7 +176,7 @@ export class PaginationSession {
         }
         end = next;
         measured = TextPaginator.measureHeight(utils, text.substring(start, end),
-          this.widthVp, this.fontSize, this.lineHeightVp);
+          this.widthVp, this.fontSize, this.lineHeightVp, this.fontFamily);
         if (measured <= 0) {
           return end;
         }
@@ -192,7 +194,7 @@ export class PaginationSession {
         next = text.length;
       }
       const extended = TextPaginator.measureHeight(utils, text.substring(start, next),
-        this.widthVp, this.fontSize, this.lineHeightVp);
+        this.widthVp, this.fontSize, this.lineHeightVp, this.fontFamily);
       if (extended <= 0 || extended > heightPx) {
         break;
       }
@@ -209,7 +211,8 @@ export class TextPaginator {
    * @param firstPageExtraHeight 首页被标题等元素占用的高度（vp），仅首页扣减
    */
   static createSession(ui: UIContext, text: string, widthVp: number, heightVp: number,
-    fontSize: number, lineHeightVp: number, firstPageExtraHeight: number = 0): PaginationSession {
+    fontSize: number, lineHeightVp: number, firstPageExtraHeight: number = 0,
+    fontFamily: string = ''): PaginationSession {
     const safeWidth = Math.max(1, widthVp);
     const safeHeight = Math.max(1, heightVp);
     const extra = firstPageExtraHeight > 0 ? firstPageExtraHeight : 0;
@@ -235,7 +238,8 @@ export class TextPaginator {
       utils = undefined;
     }
     if (utils !== undefined) {
-      const measurable = TextPaginator.calibrate(utils, safeWidth, fontSize, lineHeightVp, density, metrics);
+      const measurable = TextPaginator.calibrate(utils, safeWidth, fontSize, lineHeightVp, density, metrics,
+        fontFamily);
       if (!measurable) {
         // 测高都不可用：退回纯模型推算（不再逐页校验）
         utils = undefined;
@@ -244,7 +248,7 @@ export class TextPaginator {
     const pageHeightPx = safeHeight * density;
     const firstHeightPx = Math.max(1, safeHeight - extra) * density;
     return new PaginationSession(text, safeWidth, fontSize, lineHeightVp, pageHeightPx,
-      firstHeightPx, utils, metrics);
+      firstHeightPx, utils, metrics, fontFamily);
   }
 
   /** 一次性跑完分页（保持旧接口，供不需要分片的调用方使用） */
@@ -265,7 +269,8 @@ export class TextPaginator {
    * 字宽探针失败时保留启发式值，只影响模型初值精度，不影响正确性。
    */
   private static calibrate(utils: MeasureUtils, widthVp: number, fontSize: number,
-    lineHeightVp: number, density: number, metrics: PaginationMetrics): boolean {
+    lineHeightVp: number, density: number, metrics: PaginationMetrics,
+    fontFamily: string = ''): boolean {
     const rows: string[] = [];
     let charsPerRow = Math.floor(widthVp / Math.max(1, fontSize));
     if (charsPerRow > LINE_PROBE_CHARS) {
@@ -283,7 +288,8 @@ export class TextPaginator {
     }
     const emPx = Math.max(1, fontSize * density);
     const lineProbe = rows.join('\n');
-    const probeHeight = TextPaginator.measureHeight(utils, lineProbe, widthVp, fontSize, lineHeightVp);
+    const probeHeight = TextPaginator.measureHeight(utils, lineProbe, widthVp, fontSize, lineHeightVp,
+      fontFamily);
     let measurable = false;
     if (probeHeight > 0) {
       measurable = true;
@@ -299,7 +305,7 @@ export class TextPaginator {
     for (let i = 0; i < CJK_PROBE_COUNT; i++) {
       cjkProbe += '国';
     }
-    const cjkProbeWidth = TextPaginator.measureWidth(utils, cjkProbe, fontSize, lineHeightVp);
+    const cjkProbeWidth = TextPaginator.measureWidth(utils, cjkProbe, fontSize, lineHeightVp, fontFamily);
     if (cjkProbeWidth > 0) {
       const advance = cjkProbeWidth / CJK_PROBE_COUNT;
       // 只接受合理量级（部分版本无约束测量会返回整行宽度），否则沿用启发式字号宽度
@@ -307,7 +313,7 @@ export class TextPaginator {
         metrics.cjkWidth = advance;
       }
     }
-    const asciiProbeWidth = TextPaginator.measureWidth(utils, ASCII_PROBE, fontSize, lineHeightVp);
+    const asciiProbeWidth = TextPaginator.measureWidth(utils, ASCII_PROBE, fontSize, lineHeightVp, fontFamily);
     if (asciiProbeWidth > 0) {
       const advance = asciiProbeWidth / ASCII_PROBE.length;
       if (advance > metrics.cjkWidth * 0.15 && advance < metrics.cjkWidth * 1.2) {
@@ -370,14 +376,18 @@ export class TextPaginator {
 
   /** 测高（px），失败返回 -1 */
   static measureHeight(utils: MeasureUtils, content: string, widthVp: number,
-    fontSize: number, lineHeight: number): number {
+    fontSize: number, lineHeight: number, fontFamily: string = ''): number {
     try {
-      const size: SizeOptions = utils.measureTextSize({
+      const options: MeasureOptions = {
         textContent: content,
         constraintWidth: `${widthVp}vp`,
         fontSize: fontSize,
         lineHeight: lineHeight
-      });
+      };
+      if (fontFamily.length > 0) {
+        options.fontFamily = fontFamily;
+      }
+      const size: SizeOptions = utils.measureTextSize(options);
       let height = 0;
       if (typeof size.height === 'number') {
         height = size.height;
@@ -395,13 +405,17 @@ export class TextPaginator {
 
   /** 测自然宽度（px，不约束换行），失败返回 -1 */
   static measureWidth(utils: MeasureUtils, content: string, fontSize: number,
-    lineHeight: number): number {
+    lineHeight: number, fontFamily: string = ''): number {
     try {
-      const size: SizeOptions = utils.measureTextSize({
+      const options: MeasureOptions = {
         textContent: content,
         fontSize: fontSize,
         lineHeight: lineHeight
-      });
+      };
+      if (fontFamily.length > 0) {
+        options.fontFamily = fontFamily;
+      }
+      const size: SizeOptions = utils.measureTextSize(options);
       let width = 0;
       if (typeof size.width === 'number') {
         width = size.width;

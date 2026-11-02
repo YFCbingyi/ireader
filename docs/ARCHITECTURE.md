@@ -63,7 +63,7 @@ entry/src/main/ets/
 │       ├── TextReaderView.ets   # 文本书：竖排块窗口 + 左右页窗口
 │       ├── ImageReaderView.ets  # 图片书：竖排图片块窗口 + 左右图片页窗口
 │       ├── ImageDataSource.ets  # ImagePage + 跨章图片页数据源
-│       └── ReaderPanels.ets     # 目录 / 书签 / 设置三面板
+│       └── ReaderPanels.ets     # 目录（书名 + 目录/笔记 tab + 30 章分档）/ 书签 / 设置面板
 ├── pages/
 │   ├── Index.ets             # 书架首页 + 导入入口 + 三 Tab
 │   ├── Reader.ets            # 阅读页壳：加载、切章、进度、遮挡、模式切换
@@ -369,7 +369,7 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 **P2 · 体验**
 
 8. 百分比改为按字符数加权（`sum(charCount[0..i]) + 章内偏移 / totalChars`），更贴近真实进度。
-9. 目录加快捷定位（当前章自动滚到可视区），长书 1472 章时体验明显。
+9. ~~目录加快捷定位（当前章自动滚到可视区），长书 1472 章时体验明显~~ 已实现：打开目录自动把当前章滚到可视区中部，并按「全部 / 每 30 章」分档筛选。
 10. 左右模式支持"章首/章末"直达按钮，减少大跨度跳转频次。
 11. 竖排滚动条或进度指示器（当前只有页脚百分比）。
 

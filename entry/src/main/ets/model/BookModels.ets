@@ -10,6 +10,48 @@ export enum ReadingMode {
   HORIZONTAL = 'horizontal'
 }
 
+/** 翻页方式：仿真 / 横滑 / 上下滑动 / 无动效 */
+export enum PageTurnMode {
+  SIMULATION = 'simulation',
+  SLIDE = 'slide',
+  VERTICAL = 'vertical',
+  NONE = 'none'
+}
+
+/** 正文对齐：自动 / 左对齐 / 右对齐 / 两端对齐 */
+export enum TextAlignMode {
+  AUTO = 'auto',
+  LEFT = 'left',
+  RIGHT = 'right',
+  JUSTIFY = 'justify'
+}
+
+export function pageTurnLabel(mode: PageTurnMode): string {
+  if (mode === PageTurnMode.SIMULATION) {
+    return '仿真';
+  }
+  if (mode === PageTurnMode.SLIDE) {
+    return '横滑';
+  }
+  if (mode === PageTurnMode.VERTICAL) {
+    return '上下滑动';
+  }
+  return '无动效';
+}
+
+export function textAlignLabel(mode: TextAlignMode): string {
+  if (mode === TextAlignMode.LEFT) {
+    return '左对齐';
+  }
+  if (mode === TextAlignMode.RIGHT) {
+    return '右对齐';
+  }
+  if (mode === TextAlignMode.JUSTIFY) {
+    return '两端对齐';
+  }
+  return '自动对齐';
+}
+
 export class ReadingProgress {
   chapterIndex: number = 0;
   charOffset: number = 0;
@@ -114,6 +156,12 @@ export class ReaderSettings {
   // 阅读方向按书类型统一：所有 TXT 共用一套，所有图片书共用另一套，两者互不影响
   textReadingMode: ReadingMode = ReadingMode.VERTICAL;
   imageReadingMode: ReadingMode = ReadingMode.VERTICAL;
+  // 翻页方式同样按书类型统一：TXT 支持仿真/横滑/上下/无动效，图片书只用横滑/上下/无动效
+  textPageTurn: PageTurnMode = PageTurnMode.VERTICAL;
+  imagePageTurn: PageTurnMode = PageTurnMode.VERTICAL;
+  // 正文字体：空串 = 系统默认字体
+  fontFamily: string = '';
+  textAlignMode: TextAlignMode = TextAlignMode.AUTO;
 }
 
 export class ReaderParams {

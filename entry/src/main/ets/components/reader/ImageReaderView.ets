@@ -1,4 +1,4 @@
-import { ImageEntry, ReadingMode } from '../../model/BookModels';
+import { ImageEntry, PageTurnMode, ReadingMode } from '../../model/BookModels';
 import { AppPaths } from '../../utils/AppPaths';
 import { ImageDataSource, ImagePage } from './ImageDataSource';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -162,6 +162,7 @@ export struct ImageReaderView {
   @Prop @Watch('onReload') loadVersion: number = 0;
 
   @Prop @Watch('onConfigChanged') mode: ReadingMode = ReadingMode.VERTICAL;
+  @Prop pageTurn: PageTurnMode = PageTurnMode.SLIDE;
   @Prop chapterCount: number = 0;
   // 控制栏显示时锁定翻页、滑动与缩放，避免误触
   @Prop controlsVisible: boolean = false;
@@ -1031,6 +1032,7 @@ export struct ImageReaderView {
           .index(this.swipeIndex)
           .loop(false)
           .indicator(false)
+          .duration(this.pageTurn === PageTurnMode.NONE ? 0 : 300)
           .disableSwipe(this.controlsVisible)
           .onChange((index: number) => {
             this.handlePageChange(index);
