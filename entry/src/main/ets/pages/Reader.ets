@@ -1281,6 +1281,18 @@ struct Reader {
     })
   }
 
+  /**
+   * 点控制栏的空白区（中间大块 / 底部胶囊四周留白）。
+   * 面板打开时不能收起控制栏：面板浮在控制栏之上，控制栏一消失面板就悬空、底部 tab 也点不到，
+   * 表现就是"点面板边缘把下方控制栏点没了"。
+   */
+  private tapControlsBackground(): void {
+    if (this.panel.length > 0) {
+      return;
+    }
+    this.controlsVisible = false;
+  }
+
   /** 控制栏显隐：仅在打开时刷新进度与书签文案，减少滚动期间的无效重建 */
   private toggleControls(): void {
     if (this.controlsVisible) {
@@ -1629,7 +1641,7 @@ struct Reader {
           .layoutWeight(1)
           .hitTestBehavior(HitTestMode.Block)
           .onClick(() => {
-            this.controlsVisible = false;
+            this.tapControlsBackground();
           })
 
           Row() {
@@ -1652,6 +1664,10 @@ struct Reader {
         .width('100%')
         .height('100%')
         .padding({ left: 16, right: 16, bottom: 22 })
+        .onClick(() => {
+          // 左右 16vp / 底部 22vp 的空白不落到正文上：否则会走正文的单击逻辑把控制栏关掉
+          this.tapControlsBackground();
+        })
       }
 
       // 设置按钮的下拉菜单：盖在控制栏之上，点空白处或再点按钮收起

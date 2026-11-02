@@ -210,6 +210,7 @@ aboutToAppear
 - **模式切换（方向按书类型统一）**：`changePageTurn(mode)` 不写 `BookMeta`，而是按 `book.type` 写入 `settings.textPageTurn` 或 `settings.imagePageTurn`（`VERTICAL` 即上下卷轴，其余为左右分页），`saveSettings` 后以当前锚点重新 `openChapter`。同类型其它书下次打开即沿用新方向，另一类型不受影响。旧版本把方向存在 `BookMeta.readingMode`，该字段已移除；旧 `settings.json` 缺字段时由 `LibraryStore.getSettings()` 补 `VERTICAL`。**阅读方向只从底部「翻页」面板切换**，阅读设置抽屉不再重复提供。
 - **字号/行距/主题**：`changeFontSize`（钳制 14–30）/ `changeLineHeight` / `changeTheme` → `LibraryStore.saveSettings`。
 - **设置菜单**：顶栏「⋯」（`toggleMenu`）弹出 `readerMenu`，三项为 **阅读设置 / 添加书签 / 全文搜索**（图片书只有前两项）。菜单盖在控制栏之上，点空白只收起菜单；「添加书签」复用 `toggleBookmark`，已加过书签时文案变成「取消书签」（打开菜单前先 `updateBookmarkState()`）。
+- **面板打开时的空白区点击**：控制栏内所有空白点击统一走 `tapControlsBackground()`——`panel.length > 0` 时直接返回，**不收起控制栏**。原因：面板（`ReaderPanels`）浮在控制栏之上，收起控制栏会让面板悬空、底部 tab 也点不到；同时控制栏外层 `Column` 也挂了这个点击，挡住左右 16vp / 底部 22vp 的留白，否则这些点会落到正文 `Text` 上触发 `onTap` → `toggleControls`，同样把控制栏关掉（现象：点面板边缘控制栏消失）。
 - **阅读设置**：`panel='settings'` 抽屉，只有书签 / 笔记入口、「添加当前页书签」和 `页脚显示时间与电量` 四项：
   - `页脚显示时间与电量`：`settings.showFooterTime` → `TextReaderView.showFooterTime` → `ReaderFooter.showClock`，关闭后页脚左侧留空、只留右侧 `x/y章`。
   - **阅读方向 / 背景 / 字号 / 行距不在这个抽屉里配置**，统一走底部控制栏的「翻页 / 背景 / 字体」面板（`pageTurnSheet` / `backgroundSheet` / `fontSheet`），避免两处重复入口。因此抽屉高度按内容收口（`SETTINGS_SHEET_HEIGHT`），书签抽屉仍是 `58%`。
