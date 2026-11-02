@@ -2,9 +2,11 @@ import {
   BookMeta,
   Bookmark,
   BookManifest,
+  PageTurnMode,
   ReaderSettings,
   ReadingMode,
-  ReadingProgress
+  ReadingProgress,
+  TextAlignMode
 } from '../model/BookModels';
 import { ReadingTheme } from '../model/ReaderTheme';
 import { AppPaths } from '../utils/AppPaths';
@@ -179,6 +181,21 @@ export class LibraryStore {
       }
       if (parsed.imageReadingMode === undefined) {
         parsed.imageReadingMode = ReadingMode.VERTICAL;
+      }
+      // 翻页方式：旧配置只有方向，按方向补默认（左右 → 横滑）
+      if (parsed.textPageTurn === undefined) {
+        parsed.textPageTurn = parsed.textReadingMode === ReadingMode.HORIZONTAL
+          ? PageTurnMode.SLIDE : PageTurnMode.VERTICAL;
+      }
+      if (parsed.imagePageTurn === undefined) {
+        parsed.imagePageTurn = parsed.imageReadingMode === ReadingMode.HORIZONTAL
+          ? PageTurnMode.SLIDE : PageTurnMode.VERTICAL;
+      }
+      if (parsed.fontFamily === undefined) {
+        parsed.fontFamily = '';
+      }
+      if (parsed.textAlignMode === undefined) {
+        parsed.textAlignMode = TextAlignMode.AUTO;
       }
       return parsed;
     } catch (e) {

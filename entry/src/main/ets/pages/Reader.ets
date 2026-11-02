@@ -9,10 +9,14 @@ import {
   BookType,
   ChapterMeta,
   ImageEntry,
+  PageTurnMode,
   ReaderParams,
   ReaderSettings,
   ReadingMode,
-  ReadingProgress
+  ReadingProgress,
+  TextAlignMode,
+  pageTurnLabel,
+  textAlignLabel
 } from '../model/BookModels';
 import { Annotation, AnnotationKind } from '../model/Annotation';
 import { AppPaths } from '../utils/AppPaths';
@@ -45,8 +49,13 @@ struct Reader {
   @State chapterContent: string = '';
   @State chapterImages: ImageEntry[] = [];
   @State readingMode: ReadingMode = ReadingMode.VERTICAL;
+  @State pageTurn: PageTurnMode = PageTurnMode.VERTICAL;
   @State fontSize: number = 18;
   @State lineHeightRatio: number = 1.7;
+  @State fontFamily: string = '';
+  @State textAlignMode: TextAlignMode = TextAlignMode.AUTO;
+  // 系统字体列表：字体选择菜单用（首次打开时取一次）
+  @State fontList: string[] = [];
   @State loading: boolean = true;
   @State errorText: string = '';
   @State controlsVisible: boolean = false;
@@ -128,10 +137,15 @@ struct Reader {
     this.applyTheme();
     this.fontSize = this.settings.fontSize;
     this.lineHeightRatio = this.settings.lineHeightRatio;
-    // 方向按书类型统一：TXT 与图片书各用一套全局配置
-    this.readingMode = this.book.type === BookType.TEXT
-      ? this.settings.textReadingMode
-      : this.settings.imageReadingMode;
+    this.fontFamily = this.settings.fontFamily;
+    this.textAlignMode = this.settings.textAlignMode;
+    // 翻页方式按书类型统一：TXT 与图片书各用一套全局配置
+    this.pageTurn = this.book.type === BookType.TEXT
+      ? this.settings.textPageTurn
+      : this.settings.imagePageTurn;
+    this.readingMode = this.pageTurn === PageTurnMode.VERTICAL
+      ? ReadingMode.VERTICAL : ReadingMode.HORIZONTAL;
+    this.loadFontList();
     this.manifest = LibraryStore.getManifest(this.bookId);
     this.bookmarks = LibraryStore.getBookmarks(this.bookId);
     this.annotations = AnnotationStore.load(this.bookId);
@@ -496,6 +510,14 @@ struct Reader {
     this.openChapter(index, 0, 0, 0, true);
   }
 
+  /** 操作面板内跳章：不收起面板，用户可连续翻章后再自己关 */
+  private jumpToChapterKeepPanel(index: number): void {
+    if (index < 0 || index >= this.manifest.chapters.length) {
+      return;
+    }
+    this.openChapter(index, 0, 0, 0, true);
+  }
+
   private onTextProgress(chapterIndex: number, charOffset: number, ratio: number): void {
     // 连续卷轴下可见章号由子组件上报，进度 / 书签 / 目录高亮都以此为准
     this.progressChapter = chapterIndex;
@@ -854,21 +876,51 @@ struct Reader {
   }
 
   /**
-   * 切换阅读方向。配置按书类型统一：同类型的所有书共用一套方向，另一类型不受影响。
-   * 当前这本书立即生效，其余同类书在下次打开时生效。
+   * 切换阅读方向（设置面板的「上下 / 左右」入口）。
+   * 配置按书类型统一：同类型的所有书共用一套方向，另一类型不受影响。
    */
   private changeMode(mode: ReadingMode): void {
-    const previous = this.readingMode;
-    this.readingMode = mode;
+    this.changePageTurn(mode === ReadingMode.VERTICAL ? PageTurnMode.VERTICAL : PageTurnMode.SLIDE);
+  }
+
+  /**
+   * 切换翻页方式：仿真 / 横滑 / 上下滑动 / 无动效。
+   * 只有「上下 ↔ 左右」真正变化时才重开章节，横向三种方式只换动效。
+   */
+  private changePageTurn(mode: PageTurnMode): void {
+    const previousMode = this.readingMode;
+    this.pageTurn = mode;
     if (this.book.type === BookType.TEXT) {
-      this.settings.textReadingMode = mode;
+      this.settings.textPageTurn = mode;
     } else {
-      this.settings.imageReadingMode = mode;
+      this.settings.imagePageTurn = mode;
     }
     LibraryStore.saveSettings(this.settings);
-    if (previous !== mode) {
-      // 用当前进度章重新打开，保证两种模式切换后定位一致
+    this.readingMode = mode === PageTurnMode.VERTICAL ? ReadingMode.VERTICAL : ReadingMode.HORIZONTAL;
+    if (previousMode !== this.readingMode) {
+      // 用当前进度章重新打开，保证方向切换后定位一致
       this.openChapter(this.progressChapter, this.progressCharOffset, 0, this.progressRatio, false);
+    }
+  }
+
+  private changeFontFamily(family: string): void {
+    this.fontFamily = family;
+    this.settings.fontFamily = family;
+    LibraryStore.saveSettings(this.settings);
+  }
+
+  private changeTextAlign(mode: TextAlignMode): void {
+    this.textAlignMode = mode;
+    this.settings.textAlignMode = mode;
+    LibraryStore.saveSettings(this.settings);
+  }
+
+  private loadFontList(): void {
+    try {
+      const list: string[] = this.getUIContext().getFont().getSystemFontList();
+      this.fontList = list;
+    } catch (e) {
+      this.fontList = [];
     }
   }
 
@@ -912,16 +964,91 @@ struct Reader {
     this.applyTheme();
   }
 
-  private barBackground(): string {
-    return this.book.type === BookType.IMAGE ? '#B3000000' : this.palette.barBg;
-  }
-
   private barTextColor(): string {
     return this.book.type === BookType.IMAGE ? '#FFFFFF' : this.palette.barText;
   }
 
   private pageBackground(): string {
     return this.book.type === BookType.IMAGE ? '#000000' : this.palette.bg;
+  }
+
+  /** 控制栏上的胶囊 / 圆钮底色：深色主题与图片书用半透明白，浅色主题用配置里的 chip 色 */
+  private barChipBg(): string {
+    if (this.book.type === BookType.IMAGE) {
+      return '#33FFFFFF';
+    }
+    return this.palette.chipBg;
+  }
+
+  /** 书籍本来就在书架里，这里给出明确反馈 */
+  private addToShelf(): void {
+    const existing: BookMeta | undefined = LibraryStore.getBook(this.bookId);
+    this.toast(existing !== undefined ? '已在书架中' : '已添加到书架');
+  }
+
+  /** 顶部圆形图标按钮：图标由系统符号绘制，按钮内不放任何文字 */
+  @Builder
+  barIcon(icon: Resource, action: () => void, size: number) {
+    Row() {
+      SymbolGlyph(icon)
+        .fontSize(size >= 44 ? 22 : 20)
+        .fontColor([this.barTextColor()])
+    }
+    .width(size)
+    .height(size)
+    .justifyContent(FlexAlign.Center)
+    .alignItems(VerticalAlign.Center)
+    .backgroundColor(this.barChipBg())
+    .borderRadius(size / 2)
+    .onClick(() => {
+      action();
+    })
+  }
+
+  /** 顶部控制栏：返回 / 加入书架 / 设置，三个独立圆形按钮，纯图标无文字 */
+  @Builder
+  topBar() {
+    Row() {
+      this.barIcon($r('sys.symbol.chevron_left'), (): void => {
+        this.goBack();
+      }, 40)
+      Blank()
+      Row() {
+        this.barIcon($r('sys.symbol.plus'), (): void => {
+          this.addToShelf();
+        }, 40)
+      }
+      .margin({ right: 10 })
+      this.barIcon($r('sys.symbol.more'), (): void => {
+        this.openPanel('settings');
+      }, 40)
+    }
+    .width('100%')
+    .height(76)
+    .padding({ left: 16, right: 16, top: 24 })
+    .alignItems(VerticalAlign.Center)
+    .onClick(() => {
+    })
+  }
+
+  @Builder
+  bottomTab(icon: string, label: string, name: string) {
+    Column() {
+      Text(icon)
+        .fontSize(18)
+        .fontColor(this.panel === name ? this.palette.accent : this.barTextColor())
+      Text(label)
+        .fontSize(10)
+        .margin({ top: 3 })
+        .fontColor(this.panel === name ? this.palette.accent : this.barTextColor())
+        .opacity(this.panel === name ? 1 : 0.75)
+    }
+    .layoutWeight(1)
+    .height(58)
+    .justifyContent(FlexAlign.Center)
+    .onClick(() => {
+      this.openPanel(name);
+    })
   }
 
   /** 控制栏显隐：仅在打开时刷新进度与书签文案，减少滚动期间的无效重建 */
@@ -1164,8 +1291,11 @@ struct Reader {
           content: this.chapterContent,
           chapterTitle: this.chapterTitle,
           mode: this.readingMode,
+          pageTurn: this.pageTurn,
           fontSize: this.fontSize,
           lineHeightRatio: this.lineHeightRatio,
+          fontFamily: this.fontFamily,
+          textAlignMode: this.textAlignMode,
           chapterIndex: this.chapterIndex,
           chapterCount: this.manifest.chapters.length,
           startCharOffset: this.startCharOffset,
@@ -1182,6 +1312,7 @@ struct Reader {
           bgColor: this.palette.bg,
           textColor: this.palette.text,
           subTextColor: this.palette.subText,
+          dividerColor: this.palette.divider,
           accentColor: this.palette.accent,
           accentTextColor: this.palette.accentText,
           controlsVisible: this.controlsVisible,
@@ -1214,6 +1345,7 @@ struct Reader {
         ImageReaderView({
           images: this.chapterImages,
           mode: this.readingMode,
+          pageTurn: this.pageTurn,
           chapterCount: this.manifest.chapters.length,
           startIndex: this.startImageIndex,
           startRatio: this.startImageRatio,
@@ -1252,46 +1384,10 @@ struct Reader {
 
       if (this.controlsVisible && !this.loading && this.errorText.length === 0) {
         Column() {
-          Row() {
-            Text('‹ 返回')
-              .fontSize(15)
-              .fontColor(this.barTextColor())
-              .padding({ right: 12, top: 8, bottom: 8 })
-              .onClick(() => {
-                this.goBack();
-              })
-            Column() {
-              Text(this.book.title)
-                .fontSize(15)
-                .fontWeight(FontWeight.Medium)
-                .fontColor(this.barTextColor())
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-              Text(`${this.chapterTitle} · ${this.progressLabel}`)
-                .fontSize(11)
-                .fontColor(this.barTextColor())
-                .opacity(0.7)
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-                .margin({ top: 2 })
-            }
-            .layoutWeight(1)
-            .alignItems(HorizontalAlign.Start)
-            Text(this.bookmarked ? '已书签' : '书签')
-              .fontSize(14)
-              .fontColor(this.bookmarked ? '#D4A017' : this.barTextColor())
-              .padding({ left: 12, top: 8, bottom: 8 })
-              .onClick(() => {
-                this.toggleBookmark();
-              })
+          // 面板展开时收起顶部栏：面板从底部控制栏弹出，顶部只留阅读区域
+          if (this.panel.length === 0) {
+            this.topBar()
           }
-          .width('100%')
-          .height(96)
-          .padding({ left: 16, right: 16, top: 28 })
-          .alignItems(VerticalAlign.Center)
-          .backgroundColor(this.barBackground())
-          .onClick(() => {
-          })
 
           // 控制栏显示时中间区域吞掉点击与滑动：既不翻页也不滚动，点击即退出控制栏
           Column() {
@@ -1304,79 +1400,46 @@ struct Reader {
           })
 
           Row() {
-            Text('上一章')
-              .fontSize(13)
-              .fontColor(this.barTextColor())
-              .opacity(this.chapterIndex > 0 ? 1 : 0.35)
-              .padding({ top: 10, bottom: 10 })
-              .onClick(() => {
-                this.previousChapter();
-              })
-            Text('目录')
-              .fontSize(13)
-              .fontColor(this.barTextColor())
-              .padding({ top: 10, bottom: 10 })
-              .onClick(() => {
-                this.openPanel('catalog');
-              })
-            Text('书签')
-              .fontSize(13)
-              .fontColor(this.barTextColor())
-              .padding({ top: 10, bottom: 10 })
-              .onClick(() => {
-                this.openPanel('bookmarks');
-              })
+            this.bottomTab('☰', '目录', 'catalog')
             if (this.book.type === BookType.TEXT) {
-              Text('笔记')
-                .fontSize(13)
-                .fontColor(this.barTextColor())
-                .padding({ top: 10, bottom: 10 })
-                .onClick(() => {
-                  this.openPanel('notes');
-                })
+              this.bottomTab('A', '字体', 'font')
             }
-            Text('设置')
-              .fontSize(13)
-              .fontColor(this.barTextColor())
-              .padding({ top: 10, bottom: 10 })
-              .onClick(() => {
-                this.openPanel('settings');
-              })
-            Text('下一章')
-              .fontSize(13)
-              .fontColor(this.barTextColor())
-              .opacity(this.chapterIndex < this.manifest.chapters.length - 1 ? 1 : 0.35)
-              .padding({ top: 10, bottom: 10 })
-              .onClick(() => {
-                this.nextChapter();
-              })
+            this.bottomTab('⇅', '操作', 'actions')
+            this.bottomTab('◐', '背景', 'background')
+            this.bottomTab('⧉', '翻页', 'pageturn')
           }
           .width('100%')
-          .height(88)
-          .padding({ bottom: 26 })
-          .justifyContent(FlexAlign.SpaceAround)
-          .alignItems(VerticalAlign.Center)
-          .backgroundColor(this.barBackground())
+          .height(58)
+          .borderRadius(29)
+          .backgroundColor(this.barChipBg())
+          .padding({ left: 4, right: 4 })
           .onClick(() => {
           })
         }
         .width('100%')
         .height('100%')
+        .padding({ left: 16, right: 16, bottom: 22 })
       }
 
       if (this.panel.length > 0 && !this.loading && this.errorText.length === 0) {
         ReaderPanels({
           panel: this.panel,
+          bookTitle: this.book.title,
           chapters: this.manifest.chapters,
           currentChapter: this.chapterIndex,
+          currentOffset: this.progressCharOffset,
           bookmarks: this.bookmarks,
           annotations: this.annotations,
           isImageBook: this.book.type === BookType.IMAGE,
           readingMode: this.readingMode,
+          pageTurn: this.pageTurn,
           fontSize: this.fontSize,
           lineHeightRatio: this.lineHeightRatio,
+          fontFamily: this.fontFamily,
+          fontList: this.fontList,
+          textAlignMode: this.textAlignMode,
           theme: this.theme,
-          colors: this.book.type === BookType.IMAGE ? ReaderTheme.eye() : this.palette,
+          colors: this.book.type === BookType.IMAGE ? ReaderTheme.dark() : this.palette,
           onClose: (): void => {
             this.panel = '';
           },
@@ -1406,6 +1469,24 @@ struct Reader {
           },
           onThemeChange: (theme: ReadingTheme): void => {
             this.changeTheme(theme);
+          },
+          onSwitchPanel: (name: string): void => {
+            this.panel = name;
+          },
+          onFontFamilyChange: (family: string): void => {
+            this.changeFontFamily(family);
+          },
+          onTextAlignChange: (mode: TextAlignMode): void => {
+            this.changeTextAlign(mode);
+          },
+          onPageTurnChange: (mode: PageTurnMode): void => {
+            this.changePageTurn(mode);
+          },
+          onToggleBookmark: (): void => {
+            this.toggleBookmark();
+          },
+          onJumpChapter: (index: number): void => {
+            this.jumpToChapterKeepPanel(index);
           }
         })
       }

@@ -1,16 +1,18 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { ReadingMode } from '../../model/BookModels';
+import { batteryInfo } from '@kit.BasicServicesKit';
+import { PageTurnMode, ReadingMode, TextAlignMode } from '../../model/BookModels';
 import { Annotation, SegmentBuilder, TextSegment } from '../../model/Annotation';
 import { TextPaginator } from '../../service/TextPaginator';
 
 const DOMAIN = 0x0006;
 const TAG = 'TextReaderView';
 
-const PAGE_LEFT_RIGHT = 24;
-const HEADER_HEIGHT = 38;
-const FOOTER_HEIGHT = 42;
-const CONTENT_PAD = 12;
-const VERTICAL_PAD_TOP = 24;
+// 版式参照华为阅读：左右留白更宽，页眉小标题距顶更远，正文上下留白更大
+const PAGE_LEFT_RIGHT = 30;
+const HEADER_HEIGHT = 58;
+const FOOTER_HEIGHT = 36;
+const CONTENT_PAD = 16;
+const VERTICAL_PAD_TOP = 8;
 const VERTICAL_PAD_BOTTOM = 52;
 const FOOTER_TEXT_SIZE = 11;
 // 章标题：正文 * 1.25 加粗，下方留白
@@ -257,6 +259,21 @@ class ReaderBlockSource implements IDataSource {
     return block !== undefined ? block : ReaderBlock.of('text', '', 0, 0, 0);
   }
 
+  /** 可见区间内是否包含某类块（竖排用来判断章标题是否在屏幕上） */
+  hasKindBetween(start: number, end: number, kind: string): boolean {
+    if (this.blocks.length === 0) {
+      return false;
+    }
+    const from = Math.max(0, start);
+    const to = Math.min(this.blocks.length - 1, end);
+    for (let i = from; i <= to; i++) {
+      if (this.blocks[i].kind === kind) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   registerDataChangeListener(listener: DataChangeListener): void {
     if (this.listeners.indexOf(listener) < 0) {
       this.listeners.push(listener);
@@ -376,15 +393,21 @@ class ReaderBlockSource implements IDataSource {
 @Component
 struct ReaderFooter {
   @Prop progressText: string = '';
+  // 右侧章节进度：如 4/65章
+  @Prop chapterText: string = '';
+  @Prop badgeBg: string = '#00000000';
   @Prop subTextColor: string = '#8C8C8C';
   @State clock: string = '';
+  @State battery: number = -1;
 
   private timer: number = -1;
 
   aboutToAppear(): void {
     this.clock = ReaderFooter.formatNow();
+    this.battery = ReaderFooter.readBattery();
     this.timer = setInterval(() => {
       this.clock = ReaderFooter.formatNow();
+      this.battery = ReaderFooter.readBattery();
     }, 30000);
   }
 
@@ -404,13 +427,34 @@ struct ReaderFooter {
     return `${hh}:${mm}`;
   }
 
+  private static readBattery(): number {
+    try {
+      const soc = batteryInfo.batterySOC;
+      if (!Number.isFinite(soc) || soc < 0) {
+        return -1;
+      }
+      return Math.round(soc);
+    } catch (e) {
+      return -1;
+    }
+  }
+
   build() {
     Row() {
       Text(this.clock)
         .fontSize(FOOTER_TEXT_SIZE)
         .fontColor(this.subTextColor)
+      if (this.battery >= 0) {
+        Text(`${this.battery}`)
+          .fontSize(9)
+          .fontColor(this.subTextColor)
+          .backgroundColor(this.badgeBg)
+          .borderRadius(4)
+          .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+          .margin({ left: 6 })
+      }
       Blank()
-      Text(this.progressText)
+      Text(this.chapterText.length > 0 ? this.chapterText : this.progressText)
         .fontSize(FOOTER_TEXT_SIZE)
         .fontColor(this.subTextColor)
         .maxLines(1)
@@ -418,7 +462,7 @@ struct ReaderFooter {
     }
     .width('100%')
     .height(FOOTER_HEIGHT)
-    .padding({ left: PAGE_LEFT_RIGHT, right: PAGE_LEFT_RIGHT, bottom: 12 })
+    .padding({ left: PAGE_LEFT_RIGHT, right: PAGE_LEFT_RIGHT, bottom: 6 })
     .alignItems(VerticalAlign.Center)
   }
 }
@@ -433,12 +477,16 @@ export struct TextReaderView {
   @Prop chapterIndex: number = 0;
 
   @Prop @Watch('onModeChanged') mode: ReadingMode = ReadingMode.VERTICAL;
+  @Prop pageTurn: PageTurnMode = PageTurnMode.SLIDE;
   @Prop @Watch('onConfigChanged') fontSize: number = 18;
   @Prop @Watch('onConfigChanged') lineHeightRatio: number = 1.7;
+  @Prop @Watch('onConfigChanged') fontFamily: string = '';
+  @Prop textAlignMode: TextAlignMode = TextAlignMode.AUTO;
   @Prop chapterCount: number = 0;
   @Prop bgColor: string = '#F7F3E8';
   @Prop textColor: string = '#2B2B2B';
   @Prop subTextColor: string = '#8C8C8C';
+  @Prop dividerColor: string = '#EFE7D8';
   @Prop accentColor: string = '#8B5E3C';
   @Prop accentTextColor: string = '#FFF8ED';
   // 控制栏显示时锁定翻页与滑动，避免误触
@@ -495,6 +543,8 @@ export struct TextReaderView {
 
   // 连续卷轴：可见章号（页脚显示）
   @State currentChapter: number = 0;
+  // 竖排：章标题块在屏幕内时收起顶部小标题，避免与大标题重复
+  @State headerSuppressed: boolean = false;
 
   private blockSource: ReaderBlockSource = new ReaderBlockSource();
   private windowStart: number = 0;
@@ -560,6 +610,50 @@ export struct TextReaderView {
     return Math.round(this.fontSize * TITLE_SCALE);
   }
 
+  /** 对齐方式：自动对齐在中文下等同左对齐（跟随书写方向） */
+  private textAlignValue(): TextAlign {
+    if (this.textAlignMode === TextAlignMode.RIGHT) {
+      return TextAlign.End;
+    }
+    if (this.textAlignMode === TextAlignMode.JUSTIFY) {
+      return TextAlign.JUSTIFY;
+    }
+    return TextAlign.Start;
+  }
+
+  /** 翻页动画时长：无动效瞬时切换，仿真放慢让纸页感更明显 */
+  private turnDuration(): number {
+    if (this.pageTurn === PageTurnMode.NONE) {
+      return 0;
+    }
+    if (this.pageTurn === PageTurnMode.SIMULATION) {
+      return 520;
+    }
+    return 300;
+  }
+
+  private turnCurve(): Curve {
+    return this.pageTurn === PageTurnMode.SIMULATION ? Curve.EaseInOut : Curve.EaseOut;
+  }
+
+  /** 仿真模式给页面加一层投影，滑动时两页之间有纸页层叠的明暗分界 */
+  private pageShadow(): ShadowOptions {
+    if (this.pageTurn === PageTurnMode.SIMULATION) {
+      const options: ShadowOptions = {
+        radius: 14,
+        color: '#33000000',
+        offsetX: -8,
+        offsetY: 0
+      };
+      return options;
+    }
+    const none: ShadowOptions = {
+      radius: 0,
+      color: '#00000000'
+    };
+    return none;
+  }
+
   private titleLineHeight(): number {
     return Math.round(this.fontSize * TITLE_SCALE * this.lineHeightRatio * 10) / 10;
   }
@@ -601,8 +695,41 @@ export struct TextReaderView {
 
   /** 页眉章名：以当前页所属章为准，取不到时回退父组件下发的章名 */
   private headerTitle(): string {
+    if (this.mode === ReadingMode.VERTICAL) {
+      const chapter = this.currentChapter >= 0 ? this.currentChapter : this.chapterIndex;
+      const title = this.chapterTitleOf(chapter);
+      return title.length > 0 ? title : this.chapterTitle;
+    }
     const title = this.chapterTitleOf(this.pagedChapter);
     return title.length > 0 ? title : this.chapterTitle;
+  }
+
+  /**
+   * 顶部小标题显隐：章节首页已有大标题，不再重复小标题；
+   * 竖排时章标题块滚进视野也收起，滚过去后再出现。
+   */
+  private headerVisible(): boolean {
+    if (this.mode === ReadingMode.HORIZONTAL) {
+      const item = this.pageSource.itemAt(this.currentPage);
+      if (item === undefined) {
+        return true;
+      }
+      return item.pageIndex > 0;
+    }
+    return !this.headerSuppressed;
+  }
+
+  /** 页脚右侧：当前章/总章数，如 4/65章 */
+  private footerChapter(): string {
+    if (this.chapterCount <= 0) {
+      return '';
+    }
+    const chapter = this.mode === ReadingMode.HORIZONTAL ? this.pagedChapter : this.currentChapter;
+    const current = chapter + 1;
+    if (current < 1) {
+      return '';
+    }
+    return `${current}/${this.chapterCount}章`;
   }
 
   private onReload(): void {
@@ -996,6 +1123,11 @@ export struct TextReaderView {
     this.firstVisibleIndex = start;
     this.lastVisibleStart = start;
     this.lastVisibleEnd = end;
+    // 章标题块滚进视野时收起顶部小标题，滚过去后再出现
+    const titleOnScreen = this.blockSource.hasKindBetween(start, end, 'title');
+    if (titleOnScreen !== this.headerSuppressed) {
+      this.headerSuppressed = titleOnScreen;
+    }
     if (this.pendingScrollIndex >= 0) {
       this.consumePendingScroll();
       return;
@@ -1117,7 +1249,8 @@ export struct TextReaderView {
     const height = this.pageContentHeight();
     const title = this.chapterTitleOf(chapter);
     const titleExtra = this.titleBlockHeightOf(title);
-    const key = `${Math.round(width)}x${Math.round(height)}|${this.fontSize}|${this.lineHeightRatio}|${Math.round(titleExtra)}`;
+    const key = `${Math.round(width)}x${Math.round(height)}|${this.fontSize}|${this.lineHeightRatio}|` +
+      `${Math.round(titleExtra)}|${this.fontFamily}`;
     const cached = this.pageCache.get(chapter);
     if (cached !== undefined && cached.key === key) {
       this.touchPageCache(chapter);
@@ -1131,7 +1264,7 @@ export struct TextReaderView {
     }
     this.chapterLengths.set(chapter, text.length);
     const session = TextPaginator.createSession(this.getUIContext(), text, width, height,
-      this.fontSize, this.lineHeightValue(), titleExtra);
+      this.fontSize, this.lineHeightValue(), titleExtra, this.fontFamily);
     while (!session.isFinished()) {
       session.step(PAGINATE_SLICE_PAGES);
       if (session.isFinished()) {
@@ -1471,6 +1604,8 @@ export struct TextReaderView {
       .fontSize(this.fontSize)
       .lineHeight(this.lineHeightValue())
       .fontColor(this.textColor)
+      .fontFamily(this.fontFamily)
+      .textAlign(this.textAlignValue())
       .copyOption(CopyOptions.LocalDevice)
       .editMenuOptions(this.selectionMenu(chapter, baseStart, content))
       .onClick((event: ClickEvent) => {
@@ -1482,6 +1617,8 @@ export struct TextReaderView {
         .fontSize(this.fontSize)
         .lineHeight(this.lineHeightValue())
         .fontColor(this.textColor)
+        .fontFamily(this.fontFamily)
+        .textAlign(this.textAlignValue())
         .copyOption(CopyOptions.LocalDevice)
         .editMenuOptions(this.selectionMenu(chapter, baseStart, content))
         .onClick((event: ClickEvent) => {
@@ -1577,13 +1714,14 @@ export struct TextReaderView {
     if (target < 0 || target >= max) {
       return;
     }
+    const animated = this.pageTurn !== PageTurnMode.NONE;
     if (needSync) {
       setTimeout(() => {
-        this.swiperController.changeIndex(target, true);
+        this.swiperController.changeIndex(target, animated);
       }, 60);
       return;
     }
-    this.swiperController.changeIndex(target, true);
+    this.swiperController.changeIndex(target, animated);
   }
 
   /** 上下模式点击翻屏：按可视高度滚动一屏，跨章自然滚过章标题 */
@@ -1603,17 +1741,20 @@ export struct TextReaderView {
   @Builder
   header() {
     Row() {
-      Text(this.headerTitle())
-        .width('100%')
-        .fontSize(12)
-        .fontColor(this.subTextColor)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .textAlign(TextAlign.Start)
+      // 章节首页有大标题时不重复显示小标题，位置高度保持不变，避免正文跳动
+      if (this.headerVisible()) {
+        Text(this.headerTitle())
+          .width('100%')
+          .fontSize(12)
+          .fontColor(this.subTextColor)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .textAlign(TextAlign.Start)
+      }
     }
     .width('100%')
     .height(HEADER_HEIGHT)
-    .padding({ left: PAGE_LEFT_RIGHT, right: PAGE_LEFT_RIGHT, top: 10 })
+    .padding({ left: PAGE_LEFT_RIGHT, right: PAGE_LEFT_RIGHT, top: 30 })
     .alignItems(VerticalAlign.Center)
   }
 
@@ -1628,6 +1769,7 @@ export struct TextReaderView {
               .fontSize(this.titleFontSize())
               .fontWeight(FontWeight.Bold)
               .lineHeight(this.titleLineHeight())
+              .fontFamily(this.fontFamily)
               .fontColor(this.textColor)
               .padding({ top: index === 0 ? 0 : TITLE_GAP * 2, bottom: TITLE_GAP })
           } else {
@@ -1672,6 +1814,7 @@ export struct TextReaderView {
               .fontSize(this.titleFontSize())
               .fontWeight(FontWeight.Bold)
               .lineHeight(this.titleLineHeight())
+              .fontFamily(this.fontFamily)
               .fontColor(this.textColor)
               .margin({ bottom: TITLE_GAP })
           }
@@ -1687,6 +1830,7 @@ export struct TextReaderView {
           top: CONTENT_PAD,
           bottom: CONTENT_PAD
         })
+        .shadow(this.pageShadow())
       }, (item: PagedItem) => `${item.key}_${item.text.length}_${this.annotationsVersion}`)
     }
     .width('100%')
@@ -1695,6 +1839,8 @@ export struct TextReaderView {
     .loop(false)
     .indicator(false)
     .cachedCount(1)
+    .duration(this.turnDuration())
+    .curve(this.turnCurve())
     .disableSwipe(this.controlsVisible)
     .onChange((index: number) => {
       this.handlePageChange(index);
@@ -1703,10 +1849,7 @@ export struct TextReaderView {
 
   build() {
     Column() {
-      // 竖排连续卷轴不再固定显示章名，左右分页保留页眉
-      if (this.mode === ReadingMode.HORIZONTAL) {
-        this.header()
-      }
+      this.header()
 
       Stack() {
         if (this.mode === ReadingMode.VERTICAL) {
@@ -1720,6 +1863,8 @@ export struct TextReaderView {
 
       ReaderFooter({
         progressText: this.footerProgress(),
+        chapterText: this.footerChapter(),
+        badgeBg: this.dividerColor,
         subTextColor: this.subTextColor
       })
     }
