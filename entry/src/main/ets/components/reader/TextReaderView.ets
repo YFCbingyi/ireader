@@ -584,6 +584,27 @@ export struct TextReaderView {
   private pendingScrollAlign: ScrollAlign = ScrollAlign.START;
   private verticalScroller: Scroller = new Scroller();
   private swiperController: SwiperController = new SwiperController();
+  // 一次性延时任务句柄：页面销毁时统一取消，避免回调操作已释放的 Scroller / SwiperController
+  private pendingTimers: number[] = [];
+
+  /** 登记一次性延时任务，便于销毁时取消（替代散落的裸 setTimeout） */
+  private scheduleOnce(task: () => void, delay: number): void {
+    const timer = setTimeout(() => {
+      const index = this.pendingTimers.indexOf(timer);
+      if (index >= 0) {
+        this.pendingTimers.splice(index, 1);
+      }
+      task();
+    }, delay);
+    this.pendingTimers.push(timer);
+  }
+
+  private clearPendingTimers(): void {
+    for (let i = 0; i < this.pendingTimers.length; i++) {
+      clearTimeout(this.pendingTimers[i]);
+    }
+    this.pendingTimers = [];
+  }
 
   aboutToAppear(): void {
     if (this.mode === ReadingMode.HORIZONTAL) {
@@ -594,6 +615,11 @@ export struct TextReaderView {
 
   aboutToDisappear(): void {
     this.reportCurrent();
+    // 作废进行中的异步窗口 / 分页 / 预取，否则销毁后仍会继续读盘与 measureTextSize
+    this.windowSeq++;
+    this.pageSeq++;
+    this.layoutEpoch++;
+    this.clearPendingTimers();
     if (this.readyTimer !== -1) {
       clearTimeout(this.readyTimer);
       this.readyTimer = -1;
@@ -743,7 +769,7 @@ export struct TextReaderView {
       return;
     }
     // 延迟一帧，确保同一批下发的 chapterIndex / startCharOffset 等 @Prop 已全部更新
-    setTimeout(() => {
+    this.scheduleOnce((): void => {
       this.reload(this.startCharOffset);
     }, 0);
   }
@@ -763,7 +789,7 @@ export struct TextReaderView {
       return;
     }
     // 延迟一帧再读目标，确保 jumpChapter / jumpOffset 等 @Prop 已全部更新到位
-    setTimeout(() => {
+    this.scheduleOnce((): void => {
       this.initWindow(this.jumpChapter, this.jumpOffset);
     }, 0);
   }
@@ -852,7 +878,7 @@ export struct TextReaderView {
     this.lastVisibleEnd = this.pendingScrollIndex;
     this.updateRatio(centerChapter, charOffset);
     // 双保险：数据源重置后若 List 可见索引未变、onScrollIndex 不触发，下一帧主动定位
-    setTimeout(() => {
+    this.scheduleOnce((): void => {
       this.consumePendingScroll();
     }, 0);
     hilog.info(DOMAIN, TAG, 'initWindow center=%{public}d window=[%{public}d,%{public}d] blocks=%{public}d',
@@ -974,7 +1000,7 @@ export struct TextReaderView {
     this.blockSource.prepend(blocks);
     this.windowStart = chapter;
     // 前插把内容整体下移，必须立即补偿，否则会先闪一帧下移后的画面
-    setTimeout(() => {
+    this.scheduleOnce((): void => {
       this.applyAnchorCompensation();
     }, 0);
     hilog.debug(DOMAIN, TAG, 'prepend chapter %{public}d blocks=%{public}d', chapter, blocks.length);
@@ -1031,7 +1057,7 @@ export struct TextReaderView {
       this.chapterBlockCounts.delete(this.windowStart);
       this.blockSource.removeHead(count);
       this.windowStart++;
-      setTimeout(() => {
+      this.scheduleOnce((): void => {
         this.applyAnchorCompensation();
       }, 0);
     }
@@ -1224,7 +1250,7 @@ export struct TextReaderView {
   private prefetchNeighborPages(center: number, seq: number): void {
     const next = center + 1;
     if (next < this.chapterCount) {
-      setTimeout(() => {
+      this.scheduleOnce((): void => {
         if (seq !== this.pageSeq) {
           return;
         }
@@ -1234,7 +1260,7 @@ export struct TextReaderView {
     }
     const prev = center - 1;
     if (prev >= 0) {
-      setTimeout(() => {
+      this.scheduleOnce((): void => {
         if (seq !== this.pageSeq) {
           return;
         }
@@ -1722,7 +1748,7 @@ export struct TextReaderView {
     }
     const animated = this.pageTurn !== PageTurnMode.NONE;
     if (needSync) {
-      setTimeout(() => {
+      this.scheduleOnce((): void => {
         this.swiperController.changeIndex(target, animated);
       }, 60);
       return;

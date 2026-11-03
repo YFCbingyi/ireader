@@ -1,8 +1,10 @@
 import { common } from '@kit.AbilityKit';
-import { window } from '@kit.ArkUI';
 import { BookMeta, GroupParams, ReaderParams } from '../model/BookModels';
-import { AppPaths } from '../utils/AppPaths';
+import { SelectionUtil } from '../utils/SelectionUtil';
+import { WindowUtil } from '../utils/WindowUtil';
+import { AppBootstrap } from '../service/AppBootstrap';
 import { LibraryStore } from '../service/LibraryStore';
+import { BookSelectBar } from '../components/BookSelectBar';
 import { BookCard } from '../components/BookCard';
 
 /**
@@ -22,9 +24,7 @@ struct GroupBooks {
   @State bottomInset: number = 0;
 
   aboutToAppear(): void {
-    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    AppPaths.init(context.filesDir);
-    LibraryStore.init();
+    AppBootstrap.init(this.getUIContext().getHostContext() as common.UIAbilityContext);
     const raw = this.getUIContext().getRouter().getParams();
     const params = raw as GroupParams;
     if (params !== undefined && params !== null && params.group !== undefined) {
@@ -56,31 +56,13 @@ struct GroupBooks {
   }
 
   private async ensureFullScreenWindow(): Promise<void> {
-    try {
-      const win = await window.getLastWindow(this.appContext());
-      await win.setWindowLayoutFullScreen(true);
-      await win.setWindowSystemBarEnable(['status', 'navigation']);
-    } catch (e) {
-      console.error(`group page full screen failed: ${(e as Error).message}`);
-    }
+    await WindowUtil.enableFullScreen(this.appContext());
   }
 
   private async refreshInsets(): Promise<void> {
-    try {
-      const win = await window.getLastWindow(this.appContext());
-      const systemArea: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
-      const cutoutArea: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_CUTOUT);
-      const indicatorArea: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
-      const top = Math.max(this.getUIContext().px2vp(systemArea.topRect.height),
-        this.getUIContext().px2vp(cutoutArea.topRect.height));
-      const bottom = this.getUIContext().px2vp(indicatorArea.bottomRect.height);
-      this.topInset = top > 0 ? top : 0;
-      this.bottomInset = bottom > 0 ? bottom : 0;
-    } catch (e) {
-      console.error(`group page insets failed: ${(e as Error).message}`);
-      this.topInset = 0;
-      this.bottomInset = 0;
-    }
+    const insets = await WindowUtil.systemInsets(this.getUIContext());
+    this.topInset = insets.top;
+    this.bottomInset = insets.bottom;
   }
 
   private toast(message: string): void {
@@ -116,33 +98,23 @@ struct GroupBooks {
   }
 
   private isSelected(bookId: string): boolean {
-    return this.selectedIds.indexOf(bookId) >= 0;
+    return SelectionUtil.contains(this.selectedIds, bookId);
   }
 
   private toggleSelect(book: BookMeta): void {
     if (!this.selecting) {
       return;
     }
-    if (this.isSelected(book.id)) {
-      const next: string[] = [];
-      for (let i = 0; i < this.selectedIds.length; i++) {
-        if (this.selectedIds[i] !== book.id) {
-          next.push(this.selectedIds[i]);
-        }
-      }
-      this.selectedIds = next;
-      if (next.length === 0) {
-        this.selecting = false;
-      }
-    } else {
-      const next: string[] = this.selectedIds.slice();
-      next.push(book.id);
-      this.selectedIds = next;
+    const next: string[] = SelectionUtil.toggle(this.selectedIds, book.id);
+    this.selectedIds = next;
+    // 最后一项取消选中即退出多选（与抽取前一致）
+    if (next.length === 0) {
+      this.selecting = false;
     }
   }
 
   private allSelected(): boolean {
-    return this.books.length > 0 && this.selectedIds.length === this.books.length;
+    return SelectionUtil.allSelected(this.selectedIds, this.books.length);
   }
 
   private toggleSelectAll(): void {
@@ -150,11 +122,7 @@ struct GroupBooks {
       this.selectedIds = [];
       return;
     }
-    const next: string[] = [];
-    for (let i = 0; i < this.books.length; i++) {
-      next.push(this.books[i].id);
-    }
-    this.selectedIds = next;
+    this.selectedIds = SelectionUtil.collectIds(this.books);
   }
 
   /** 选中的书移出分组 → 回到书架 */
@@ -316,51 +284,6 @@ struct GroupBooks {
   }
 
   @Builder
-  selectHeader() {
-    Row() {
-      Text('取消')
-        .fontSize(15)
-        .fontColor('#8B5E3C')
-        .padding({ top: 8, bottom: 8, right: 12 })
-        .onClick(() => {
-          this.exitSelect();
-        })
-      Blank()
-      Text(`已选 ${this.selectedIds.length} 本`)
-        .fontSize(15)
-        .fontWeight(FontWeight.Medium)
-        .fontColor('#2B2B2B')
-      Blank()
-      Text(this.allSelected() ? '取消全选' : '全选')
-        .fontSize(14)
-        .fontColor('#8B5E3C')
-        .padding({ left: 8, right: 8, top: 8, bottom: 8 })
-        .onClick(() => {
-          this.toggleSelectAll();
-        })
-      Text('移出分组')
-        .fontSize(14)
-        .fontColor(this.selectedIds.length > 0 ? '#8B5E3C' : '#C4B69E')
-        .padding({ left: 8, right: 8, top: 8, bottom: 8 })
-        .onClick(() => {
-          this.moveOutSelected();
-        })
-      Button('删除')
-        .type(ButtonType.Capsule)
-        .backgroundColor(this.selectedIds.length > 0 ? '#B23A2E' : '#D9D0C2')
-        .fontColor('#FFF8ED')
-        .fontSize(13)
-        .height(34)
-        .enabled(this.selectedIds.length > 0)
-        .onClick(() => {
-          this.confirmDelete();
-        })
-    }
-    .width('100%')
-    .alignItems(VerticalAlign.Center)
-  }
-
-  @Builder
   emptyState() {
     Column() {
       Text('分组里还没有书')
@@ -471,7 +394,23 @@ struct GroupBooks {
       Column() {
         Column() {
           if (this.selecting) {
-            this.selectHeader()
+            BookSelectBar({
+              selectedCount: this.selectedIds.length,
+              allSelected: this.allSelected(),
+              actionLabel: '移出分组',
+              onCancel: (): void => {
+                this.exitSelect();
+              },
+              onToggleAll: (): void => {
+                this.toggleSelectAll();
+              },
+              onAction: (): void => {
+                this.moveOutSelected();
+              },
+              onDelete: (): void => {
+                this.confirmDelete();
+              }
+            })
           } else {
             this.titleHeader()
           }
@@ -504,6 +443,8 @@ struct GroupBooks {
                   }
                 })
               }
+            // key 里必须带 updatedAt：ForEach 对相同 key 只复用组件、不重新下发数据，
+            // 去掉后从阅读页返回时书卡进度文字不会刷新（已实测）
             }, (item: BookMeta) => `${item.id}_${item.updatedAt}_${item.group}`)
           }
           .columnsTemplate('1fr 1fr 1fr')

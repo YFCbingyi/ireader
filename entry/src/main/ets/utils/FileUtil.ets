@@ -201,21 +201,39 @@ export class FileUtil {
     }
   }
 
+  /**
+   * 原子写：先写 .tmp，再 rename 覆盖目标。
+   * 不再「先 unlink 目标」——两次系统调用之间进程被杀，旧文件已删、新文件未就位，
+   * 会导致 library/settings/bookmarks/annotations 整文件丢失。
+   * 同目录 rename 是原子替换；仅当平台返回失败时才回退为直接覆盖写。
+   */
   static writeTextAtomic(path: string, content: string): void {
     const tempPath = `${path}.tmp`;
     FileUtil.writeText(tempPath, content);
     try {
+      fs.renameSync(tempPath, path);
+      return;
+    } catch (e) {
+      const err = e as BusinessError;
+      hilog.warn(DOMAIN, TAG, 'atomic rename failed, fallback to direct write: %{public}s %{public}s',
+        path, err.message);
+    }
+    try {
+      FileUtil.writeText(path, content);
+    } finally {
+      FileUtil.discardTemp(tempPath);
+    }
+  }
+
+  /** 清理临时文件，失败不阻塞主流程 */
+  private static discardTemp(path: string): void {
+    try {
       if (fs.accessSync(path)) {
         fs.unlinkSync(path);
       }
-      fs.renameSync(tempPath, path);
     } catch (e) {
       const err = e as BusinessError;
-      hilog.error(DOMAIN, TAG, 'rename failed: %{public}s %{public}s', path, err.message);
-      FileUtil.writeText(path, content);
-      if (fs.accessSync(tempPath)) {
-        fs.unlinkSync(tempPath);
-      }
+      hilog.warn(DOMAIN, TAG, 'discard temp failed: %{public}s %{public}s', path, err.message);
     }
   }
 

@@ -1,6 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { DailyReading } from '../model/ReadingStats';
-import { AppPaths } from '../utils/AppPaths';
+import { AppBootstrap } from '../service/AppBootstrap';
 import { LibraryStore } from '../service/LibraryStore';
 import { ReadingStatsStore } from '../service/ReadingStatsStore';
 
@@ -17,9 +17,7 @@ export struct ProfilePanel {
   @State todayKey: string = '';
 
   aboutToAppear(): void {
-    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    AppPaths.init(context.filesDir);
-    LibraryStore.init();
+    AppBootstrap.init(this.getUIContext().getHostContext() as common.UIAbilityContext);
     this.loadStats();
   }
 

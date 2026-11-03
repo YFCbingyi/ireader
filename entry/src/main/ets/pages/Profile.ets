@@ -1,16 +1,13 @@
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
-import { AppPaths } from '../utils/AppPaths';
-import { LibraryStore } from '../service/LibraryStore';
+import { AppBootstrap } from '../service/AppBootstrap';
 import { ProfilePanel } from '../components/ProfilePanel';
 
 @Entry
 @Component
 struct Profile {
   aboutToAppear(): void {
-    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    AppPaths.init(context.filesDir);
-    LibraryStore.init();
+    AppBootstrap.init(this.getUIContext().getHostContext() as common.UIAbilityContext);
   }
 
   private goBack(): void {
