@@ -180,6 +180,21 @@ struct Index {
     return result;
   }
 
+  /** 分组卡预览格里的书名：不足位返回空串 */
+  private groupPreviewTitle(group: string, index: number): string {
+    const list = this.groupBooks(group);
+    if (list.length <= index) {
+      return '';
+    }
+    return list[index].title.length === 0 ? '无题' : list[index].title;
+  }
+
+  /** 分组卡预览格是否画成图片书的配色 */
+  private groupPreviewIsImage(group: string, index: number): boolean {
+    const list = this.groupBooks(group);
+    return list.length > index && list[index].type === BookType.IMAGE;
+  }
+
   /** 长按单本：进入管理态，该书放大、其余雾化，书下方弹出操作项 */
   private enterManage(book: BookMeta): void {
     this.selecting = false;
@@ -634,9 +649,9 @@ struct Index {
   @Builder
   filterBar() {
     Row() {
-      this.filterItem(FILTER_ALL, '所有内容')
-      this.filterItem(FILTER_TEXT, '文本书')
-      this.filterItem(FILTER_IMAGE, '图片书')
+      this.filterItem(FILTER_ALL, '书架')
+      this.filterItem(FILTER_TEXT, '文本')
+      this.filterItem(FILTER_IMAGE, '图书')
     }
     .width('100%')
     .height(42)
@@ -754,21 +769,48 @@ struct Index {
     .backgroundColor('#FDFBF7')
   }
 
-  /** 分组卡里的 2×2 封面缩略格 */
+  /** 分组卡里的 2×2 封面缩略格：有书时画迷你封面（书脊 + 书名），不足 4 本的空位留白 */
   @Builder
   groupCell(name: string, index: number) {
-    Column() {
+    Stack({ alignContent: Alignment.Center }) {
       if (this.groupBooks(name).length > index) {
-        Column()
-          .width('100%')
+        Row() {
+          // 书脊：右侧一本书越靠左越暗的压边
+          Column()
+            .width(2.5)
+            .height('100%')
+            .linearGradient({
+              angle: 90,
+              colors: [['#66000000', 0.0], ['#2E000000', 0.55], ['#12000000', 1.0]]
+            })
+
+          Column() {
+            Text(this.groupPreviewTitle(name, index))
+              .width('100%')
+              .fontSize(7)
+              .lineHeight(9)
+              .fontWeight(FontWeight.Medium)
+              .fontColor('#FFF8ED')
+              .maxLines(3)
+              .textAlign(TextAlign.Center)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .layoutWeight(1)
           .height('100%')
-          .borderRadius(3)
-          .linearGradient({
-            angle: 135,
-            colors: this.groupBooks(name)[index].type === BookType.IMAGE
-              ? [['#2C5F6E', 0.0], ['#3F8B99', 1.0]]
-              : [['#8B5E3C', 0.0], ['#B8860B', 1.0]]
-          })
+          .padding({ left: 1, right: 1 })
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Center)
+        }
+        .width('100%')
+        .height('100%')
+        .borderRadius(3)
+        .clip(true)
+        .linearGradient({
+          angle: 135,
+          colors: this.groupPreviewIsImage(name, index)
+            ? [['#2C5F6E', 0.0], ['#3F8B99', 1.0]]
+            : [['#8B5E3C', 0.0], ['#B8860B', 1.0]]
+        })
       }
     }
     .layoutWeight(1)
