@@ -27,7 +27,9 @@ const SETTINGS_SHEET_HEIGHT: number = 284;
 export struct ReaderPanels {
   @Prop panel: string = '';
   @Prop bookTitle: string = '';
-  @Prop chapters: ChapterMeta[] = [];
+  // 目录用的章节表可能上千条，@Prop 会在父组件每次刷新时深拷贝整表；
+  // 本组件只读不改，改用 @Link 按引用传递（父组件传 $chapterList）
+  @Link chapters: ChapterMeta[];
   @Prop currentChapter: number = 0;
   // 当前章内偏移：目录里「当前读到」右侧的位置数字
   @Prop currentOffset: number = 0;
