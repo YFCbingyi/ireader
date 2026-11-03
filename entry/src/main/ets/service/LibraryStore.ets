@@ -88,6 +88,10 @@ export class LibraryStore {
           if (item.progress === undefined) {
             item.progress = new ReadingProgress();
           }
+          // 旧版本没有分组字段，补空串（未分组）
+          if (item.group === undefined) {
+            item.group = '';
+          }
           result.push(item);
         }
       }
@@ -131,6 +135,55 @@ export class LibraryStore {
 
   static removeBook(bookId: string): void {
     LibraryStore.removeBooks([bookId]);
+  }
+
+  /** 所有已存在的分组名（按首次出现顺序去重） */
+  static listGroups(): string[] {
+    const books = LibraryStore.getBooks();
+    const names: string[] = [];
+    for (let i = 0; i < books.length; i++) {
+      const name = books[i].group;
+      if (name !== undefined && name.length > 0 && names.indexOf(name) < 0) {
+        names.push(name);
+      }
+    }
+    return names;
+  }
+
+  /** 重命名分组：把所有属于 oldName 的书改到 newName */
+  static renameGroup(oldName: string, newName: string): void {
+    if (oldName.length === 0 || newName.length === 0 || oldName === newName) {
+      return;
+    }
+    const books = LibraryStore.getBooks();
+    let changed = false;
+    for (let i = 0; i < books.length; i++) {
+      if (books[i].group === oldName) {
+        books[i].group = newName;
+        changed = true;
+      }
+    }
+    if (changed) {
+      LibraryStore.saveBooks(books);
+    }
+  }
+
+  /** 批量设置分组；group 传空串表示移出分组 */
+  static setGroup(bookIds: string[], group: string): void {
+    if (bookIds.length === 0) {
+      return;
+    }
+    const books = LibraryStore.getBooks();
+    let changed = false;
+    for (let i = 0; i < books.length; i++) {
+      if (bookIds.indexOf(books[i].id) >= 0) {
+        books[i].group = group;
+        changed = true;
+      }
+    }
+    if (changed) {
+      LibraryStore.saveBooks(books);
+    }
   }
 
   static removeBooks(bookIds: string[]): void {

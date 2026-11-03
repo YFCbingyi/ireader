@@ -67,6 +67,8 @@ export class BookMeta {
   type: BookType = BookType.TEXT;
   coverFile: string = '';
   chapterCount: number = 0;
+  /** 所属分组名，空串表示未分组 */
+  group: string = '';
   // 阅读方向不再按书保存，统一存在 ReaderSettings.textReadingMode / imageReadingMode
   progress: ReadingProgress = new ReadingProgress();
   createdAt: number = 0;
@@ -78,6 +80,7 @@ export class BookMeta {
     book.title = title;
     book.type = type;
     book.chapterCount = chapterCount;
+    book.group = '';
     book.createdAt = Date.now();
     book.updatedAt = book.createdAt;
     book.progress = new ReadingProgress();
@@ -190,6 +193,11 @@ export class SearchHit {
 
 export class ReaderParams {
   bookId: string = '';
+}
+
+/** 打开分组页面时传入的分组名 */
+export class GroupParams {
+  group: string = '';
 }
 
 export class ImportResult {

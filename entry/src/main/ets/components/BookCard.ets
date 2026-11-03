@@ -136,6 +136,24 @@ export struct BookCard {
           .height('100%')
           .hitTestBehavior(HitTestMode.Transparent)
         }
+
+        if (this.book.group !== undefined && this.book.group.length > 0) {
+          Stack({ alignContent: Alignment.TopStart }) {
+            Text(this.book.group)
+              .fontSize(9)
+              .fontColor('#FFF8ED')
+              .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+              .borderRadius(4)
+              .backgroundColor('#59000000')
+              .margin({ top: 6, left: 10 })
+              .maxLines(1)
+              .constraintSize({ maxWidth: 66 })
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width('100%')
+          .height('100%')
+          .hitTestBehavior(HitTestMode.Transparent)
+        }
       }
       .layoutWeight(1)
       .height('100%')
