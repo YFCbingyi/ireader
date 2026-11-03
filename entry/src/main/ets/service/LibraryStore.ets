@@ -75,6 +75,15 @@ export class LibraryStore {
   }
 
   static getBooks(): BookMeta[] {
+    const books = LibraryStore.loadBooks();
+    return books === undefined ? [] : books;
+  }
+
+  /**
+   * 读全表。返回 undefined 表示「文件存在但解析失败」，与「文件不存在/空文件」区分开：
+   * 前者绝不能拿去整表覆盖写回，否则会把其余书静默抹掉。
+   */
+  private static loadBooks(): BookMeta[] | undefined {
     const raw = FileUtil.readText(LibraryStore.libraryPath());
     if (raw.length === 0) {
       return [];
@@ -99,8 +108,19 @@ export class LibraryStore {
       return result;
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'parse library failed');
-      return [];
+      return undefined;
     }
+  }
+
+  /** library.json 解析失败时另存一份原始内容，避免后续覆盖写把现场彻底冲掉 */
+  private static backupBrokenLibrary(): void {
+    const raw = FileUtil.readText(LibraryStore.libraryPath());
+    if (raw.length === 0) {
+      return;
+    }
+    const backupPath = `${AppPaths.getFilesDir()}/library.broken.json`;
+    FileUtil.writeText(backupPath, raw);
+    hilog.error(DOMAIN, TAG, 'library.json unparsable, backup to %{public}s', backupPath);
   }
 
   static getBook(bookId: string): BookMeta | undefined {
@@ -118,7 +138,13 @@ export class LibraryStore {
   }
 
   static saveBook(book: BookMeta): void {
-    const books = LibraryStore.getBooks();
+    const books = LibraryStore.loadBooks();
+    if (books === undefined) {
+      // 原文件损坏：先留一份现场，再以当前书重建，至少不丢这本书、也不彻底冲掉其余数据
+      LibraryStore.backupBrokenLibrary();
+      LibraryStore.saveBooks([book]);
+      return;
+    }
     let found = false;
     for (let i = 0; i < books.length; i++) {
       if (books[i].id === book.id) {
@@ -190,7 +216,13 @@ export class LibraryStore {
     if (bookIds.length === 0) {
       return;
     }
-    const books = LibraryStore.getBooks();
+    const books = LibraryStore.loadBooks();
+    if (books === undefined) {
+      // 表损坏时若照常删除，会把 library.json 覆盖成空表（等于清空书架），宁可本次不删
+      LibraryStore.backupBrokenLibrary();
+      hilog.error(DOMAIN, TAG, 'skip removeBooks: library.json unparsable');
+      return;
+    }
     const remain: BookMeta[] = [];
     for (let i = 0; i < books.length; i++) {
       if (bookIds.indexOf(books[i].id) < 0) {

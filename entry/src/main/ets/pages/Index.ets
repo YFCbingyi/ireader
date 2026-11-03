@@ -1,10 +1,13 @@
 import { common } from '@kit.AbilityKit';
 import { picker } from '@kit.CoreFileKit';
-import { window } from '@kit.ArkUI';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { BookMeta, BookType, GroupParams, ImportResult, ReaderParams } from '../model/BookModels';
 import { AppPaths } from '../utils/AppPaths';
+import { SelectionUtil } from '../utils/SelectionUtil';
+import { WindowUtil } from '../utils/WindowUtil';
+import { AppBootstrap } from '../service/AppBootstrap';
 import { LibraryStore } from '../service/LibraryStore';
+import { BookSelectBar } from '../components/BookSelectBar';
 import { ImportService } from '../service/ImportService';
 import { BookCard } from '../components/BookCard';
 import { DiscoverPanel } from '../components/DiscoverPanel';
@@ -57,9 +60,7 @@ struct Index {
   }
 
   aboutToAppear(): void {
-    const context = this.appContext();
-    AppPaths.init(context.filesDir);
-    LibraryStore.init();
+    AppBootstrap.init(this.appContext());
     this.loadBooks();
   }
 
@@ -141,6 +142,11 @@ struct Index {
 
   /** 打开分组的独立页面（书籍不在书架里重复展示） */
   private async openGroupPage(group: string): Promise<void> {
+    // 管理态下点分组卡只当作「点其他地方」：先退出选中，不跳页
+    if (this.managing) {
+      this.exitManage();
+      return;
+    }
     const params = new GroupParams();
     params.group = group;
     this.exitSelect();
@@ -295,33 +301,13 @@ struct Index {
   }
 
   private async ensureFullScreenWindow(): Promise<void> {
-    try {
-      const win = await window.getLastWindow(this.appContext());
-      await win.setWindowLayoutFullScreen(true);
-      await win.setWindowSystemBarEnable(['status', 'navigation']);
-    } catch (e) {
-      const err = e as BusinessError;
-      console.error(`ensure full screen window failed: ${err.message}`);
-    }
+    await WindowUtil.enableFullScreen(this.appContext());
   }
 
   private async refreshInsets(): Promise<void> {
-    try {
-      const win = await window.getLastWindow(this.appContext());
-      const systemArea: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
-      const cutoutArea: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_CUTOUT);
-      const indicatorArea: window.AvoidArea = win.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
-      // 刘海/挖孔区域比状态栏更高时取较大值，保证标题不被遮挡
-      const top = Math.max(px2vp(systemArea.topRect.height), px2vp(cutoutArea.topRect.height));
-      const bottom = px2vp(indicatorArea.bottomRect.height);
-      this.topInset = top > 0 ? top : 0;
-      this.bottomInset = bottom > 0 ? bottom : 0;
-    } catch (e) {
-      const err = e as BusinessError;
-      console.error(`refresh insets failed: ${err.message}`);
-      this.topInset = 0;
-      this.bottomInset = 0;
-    }
+    const insets = await WindowUtil.systemInsets(this.getUIContext());
+    this.topInset = insets.top;
+    this.bottomInset = insets.bottom;
   }
 
   private tabBarInset(): number {
@@ -411,34 +397,23 @@ struct Index {
   }
 
   private isSelected(bookId: string): boolean {
-    return this.selectedIds.indexOf(bookId) >= 0;
+    return SelectionUtil.contains(this.selectedIds, bookId);
   }
 
   private toggleSelect(book: BookMeta): void {
     if (!this.selecting) {
       return;
     }
-    if (this.isSelected(book.id)) {
-      const next: string[] = [];
-      for (let i = 0; i < this.selectedIds.length; i++) {
-        if (this.selectedIds[i] !== book.id) {
-          next.push(this.selectedIds[i]);
-        }
-      }
-      this.selectedIds = next;
-      if (next.length === 0) {
-        this.selecting = false;
-      }
-    } else {
-      const next: string[] = this.selectedIds.slice();
-      next.push(book.id);
-      this.selectedIds = next;
+    const next: string[] = SelectionUtil.toggle(this.selectedIds, book.id);
+    this.selectedIds = next;
+    // 最后一项取消选中即退出多选（与抽取前一致，不动 managing 状态）
+    if (next.length === 0) {
+      this.selecting = false;
     }
   }
 
   private allSelected(): boolean {
-    const shown = this.visibleBooks();
-    return shown.length > 0 && this.selectedIds.length === shown.length;
+    return SelectionUtil.allSelected(this.selectedIds, this.visibleBooks().length);
   }
 
   private toggleSelectAll(): void {
@@ -446,12 +421,7 @@ struct Index {
       this.selectedIds = [];
       return;
     }
-    const shown = this.visibleBooks();
-    const next: string[] = [];
-    for (let i = 0; i < shown.length; i++) {
-      next.push(shown[i].id);
-    }
-    this.selectedIds = next;
+    this.selectedIds = SelectionUtil.collectIds(this.visibleBooks());
   }
 
   private confirmBatchDelete(): void {
@@ -1366,43 +1336,23 @@ struct Index {
     Column() {
       Row() {
         if (this.selecting) {
-          Text('取消')
-            .fontSize(15)
-            .fontColor('#8B5E3C')
-            .padding({ top: 8, bottom: 8, right: 12 })
-            .onClick(() => {
+          BookSelectBar({
+            selectedCount: this.selectedIds.length,
+            allSelected: this.allSelected(),
+            actionLabel: '分组至',
+            onCancel: (): void => {
               this.exitSelect();
-            })
-          Blank()
-          Text(`已选 ${this.selectedIds.length} 本`)
-            .fontSize(15)
-            .fontWeight(FontWeight.Medium)
-            .fontColor('#2B2B2B')
-          Blank()
-          Text(this.allSelected() ? '取消全选' : '全选')
-            .fontSize(14)
-            .fontColor('#8B5E3C')
-            .padding({ left: 8, right: 8, top: 8, bottom: 8 })
-            .onClick(() => {
+            },
+            onToggleAll: (): void => {
               this.toggleSelectAll();
-            })
-          Text('分组至')
-            .fontSize(14)
-            .fontColor(this.selectedIds.length > 0 ? '#8B5E3C' : '#C4B69E')
-            .padding({ left: 8, right: 8, top: 8, bottom: 8 })
-            .onClick(() => {
+            },
+            onAction: (): void => {
               this.openGroupSheet();
-            })
-          Button('删除')
-            .type(ButtonType.Capsule)
-            .backgroundColor(this.selectedIds.length > 0 ? '#B23A2E' : '#D9D0C2')
-            .fontColor('#FFF8ED')
-            .fontSize(13)
-            .height(34)
-            .enabled(this.selectedIds.length > 0)
-            .onClick(() => {
+            },
+            onDelete: (): void => {
               this.confirmBatchDelete();
-            })
+            }
+          })
         } else {
           Column() {
             Text(this.tabTitle())
@@ -1419,15 +1369,8 @@ struct Index {
           .layoutWeight(1)
           .alignItems(HorizontalAlign.Start)
 
-          if (this.managing) {
-            Text('取消')
-              .fontSize(15)
-              .fontColor('#8B5E3C')
-              .padding({ left: 12, right: 4, top: 8, bottom: 8 })
-              .onClick(() => {
-                this.exitManage();
-              })
-          } else if (this.currentTab === TAB_BOOKSHELF) {
+          // 管理态下不再提供「取消」按钮：点弹窗外部即可退出，右上角留给书架图标按钮
+          if (!this.managing && this.currentTab === TAB_BOOKSHELF) {
             this.downloadsButton()
             this.importMenuButton()
           }
@@ -1455,6 +1398,10 @@ struct Index {
     // 空白处吃掉点击（不穿透到下面的书卡），但滑动仍交给书架列表
     .hitTestBehavior(HitTestMode.Transparent)
     .onClick(() => {
+      // 点顶部栏空白也退出管理态
+      if (this.managing) {
+        this.exitManage();
+      }
     })
     .onAreaChange((oldValue: Area, newValue: Area) => {
       const height = Number(newValue.height);
@@ -1485,6 +1432,9 @@ struct Index {
                 GridItem() {
                   this.groupGridCard(name)
                 }
+                // 管理态下分组卡属于「其余内容」：与书卡一样雾化，否则只有书被处理、分组看着还是亮的
+                .blur(this.managing ? 8 : 0)
+                .opacity(this.managing ? 0.5 : 1)
               }, (name: string) => `group_${name}_${this.groupCount(name)}`)
               ForEach(this.visibleBooks(), (item: BookMeta) => {
                 GridItem() {
@@ -1527,9 +1477,16 @@ struct Index {
                     placement: Placement.Bottom,
                     popupColor: '#FDFBF7',
                     enableArrow: false,
-                    autoCancel: false,
+                    // 点外部即收起弹窗，再由 onStateChange 同步退出管理态。
+                    // 注意：autoCancel 为 false 时弹窗的遮障层会吞掉外部点击，页面里的 onClick 收不到。
+                    autoCancel: true,
                     radius: 18,
-                    shadow: ShadowStyle.OUTER_DEFAULT_MD
+                    shadow: ShadowStyle.OUTER_DEFAULT_MD,
+                    onStateChange: (event) => {
+                      if (!event.isVisible && this.managing) {
+                        this.exitManage();
+                      }
+                    }
                   })
                 }
               }, (item: BookMeta) => `${item.id}_${item.updatedAt}_${item.group}`)
@@ -1540,6 +1497,12 @@ struct Index {
             .layoutWeight(1)
             .padding({ left: 20, right: 20, bottom: this.bottomInset + 24 })
             .scrollBar(BarState.Off)
+            // 点网格空白处退出管理态（书卡与分组卡各自消费自己的点击）
+            .onClick(() => {
+              if (this.managing) {
+                this.exitManage();
+              }
+            })
           }
         } else if (this.currentTab === TAB_DISCOVER) {
           DiscoverPanel()

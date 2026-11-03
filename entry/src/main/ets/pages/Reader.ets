@@ -15,14 +15,13 @@ import {
   ReadingMode,
   ReadingProgress,
   SearchHit,
-  TextAlignMode,
-  pageTurnLabel,
-  textAlignLabel
+  TextAlignMode
 } from '../model/BookModels';
 import { Annotation, AnnotationKind } from '../model/Annotation';
 import { AppPaths } from '../utils/AppPaths';
 import { FileUtil } from '../utils/FileUtil';
 import { AnnotationStore } from '../service/AnnotationStore';
+import { AppBootstrap } from '../service/AppBootstrap';
 import { LibraryStore } from '../service/LibraryStore';
 import { ReadingStatsStore } from '../service/ReadingStatsStore';
 import { ReaderTheme, ReaderThemeColors, ReadingTheme } from '../model/ReaderTheme';
@@ -48,6 +47,8 @@ const SEARCH_HISTORY_LIMIT = 10;
 struct Reader {
   @State book: BookMeta = new BookMeta();
   @State manifest: BookManifest = new BookManifest();
+  // 与 manifest.chapters 同引用：@Link 只能用状态变量初始化，供面板按引用读取目录（避免整表深拷贝）
+  @State chapterList: ChapterMeta[] = [];
   @State settings: ReaderSettings = new ReaderSettings();
   @State bookmarks: Bookmark[] = [];
   @State chapterIndex: number = 0;
@@ -82,6 +83,8 @@ struct Reader {
   @State bookmarked: boolean = false;
   @State theme: ReadingTheme = ReadingTheme.EYE;
   @State palette: ReaderThemeColors = ReaderTheme.eye();
+  // 图片书面板专用深色色板：只建一次，避免每次渲染都给子组件传新对象导致整面板重建
+  private imagePalette: ReaderThemeColors = ReaderTheme.dark();
   // 顶部设置按钮的下拉菜单：阅读设置 / 添加书签 / 全文搜索
   @State menuVisible: boolean = false;
   // 阅读设置：页脚左侧时间电量
@@ -130,8 +133,7 @@ struct Reader {
 
   async aboutToAppear(): Promise<void> {
     const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    AppPaths.init(context.filesDir);
-    LibraryStore.init();
+    AppBootstrap.init(context);
     const raw = this.getUIContext().getRouter().getParams();
     const params = raw as ReaderParams;
     if (params !== undefined && params !== null && params.bookId !== undefined) {
@@ -165,6 +167,7 @@ struct Reader {
       ? ReadingMode.VERTICAL : ReadingMode.HORIZONTAL;
     this.loadFontList();
     this.manifest = LibraryStore.getManifest(this.bookId);
+    this.chapterList = this.manifest.chapters;
     this.bookmarks = LibraryStore.getBookmarks(this.bookId);
     this.searchHistory = LibraryStore.getSearchHistory(this.bookId);
     this.annotations = AnnotationStore.load(this.bookId);
@@ -204,6 +207,9 @@ struct Reader {
     this.stopReadingSession();
     this.flushProgress();
     this.clearTurnMaskTimer();
+    // 中止全文搜索：runSearch 是逐章 await 的循环，不递增序号会在页面销毁后继续读盘并写已失效的状态
+    this.searchSeq++;
+    this.searchRunning = false;
     this.exitImmersive();
   }
 
@@ -505,31 +511,6 @@ struct Reader {
     }
     this.chapterTextCache.set(key, text);
     this.cacheKeys.push(key);
-  }
-
-  /** 上一章：落到上一章末尾（文本为末字，图片为最后一张） */
-  private previousChapter(): void {
-    if (this.chapterIndex <= 0) {
-      return;
-    }
-    const target = this.chapterIndex - 1;
-    const chapter = this.manifest.chapters[target];
-    let charOffset = 0;
-    let imageIndex = 0;
-    if (chapter !== undefined) {
-      if (this.book.type === BookType.TEXT) {
-        charOffset = Math.max(0, chapter.charCount);
-      } else {
-        imageIndex = Math.max(0, chapter.images.length - 1);
-      }
-    }
-    this.openChapter(target, charOffset, imageIndex, 0, true);
-  }
-
-  private nextChapter(): void {
-    if (this.chapterIndex < this.manifest.chapters.length - 1) {
-      this.openChapter(this.chapterIndex + 1, 0, 0, 0, true);
-    }
   }
 
   private jumpToChapter(index: number): void {
@@ -943,7 +924,7 @@ struct Reader {
 
   /** 面板 / 菜单配色：图片书正文是黑底，用深色面板，其余跟随阅读主题 */
   private panelColors(): ReaderThemeColors {
-    return this.book.type === BookType.IMAGE ? ReaderTheme.dark() : this.palette;
+    return this.book.type === BookType.IMAGE ? this.imagePalette : this.palette;
   }
 
   // ================= 顶部设置菜单 =================
@@ -1147,10 +1128,10 @@ struct Reader {
     return this.palette.chipBg;
   }
 
-  /** 书籍本来就在书架里，这里给出明确反馈 */
+  /** 书籍本来就在书架里（阅读页只能从书架进入），这里给出明确反馈 */
   private addToShelf(): void {
-    const existing: BookMeta | undefined = LibraryStore.getBook(this.bookId);
-    this.toast(existing !== undefined ? '已在书架中' : '已添加到书架');
+    // 原实现每次点按都 getBook() 整表读盘 + 解析，只为区分一个永远成立的分支
+    this.toast('已在书架中');
   }
 
   /** 顶部圆形图标按钮：图标由系统符号绘制，按钮内不放任何文字 */
@@ -1679,7 +1660,7 @@ struct Reader {
         ReaderPanels({
           panel: this.panel,
           bookTitle: this.book.title,
-          chapters: this.manifest.chapters,
+          chapters: $chapterList,
           currentChapter: this.chapterIndex,
           currentOffset: this.progressCharOffset,
           bookmarks: this.bookmarks,
@@ -1692,7 +1673,7 @@ struct Reader {
           fontList: this.fontList,
           textAlignMode: this.textAlignMode,
           theme: this.theme,
-          colors: this.book.type === BookType.IMAGE ? ReaderTheme.dark() : this.palette,
+          colors: this.panelColors(),
           showFooterTime: this.showFooterTime,
           searchKeyword: this.searchKeyword,
           searchRunning: this.searchRunning,
