@@ -14,6 +14,13 @@ const TAB_BOOKSHELF = 0;
 const TAB_DISCOVER = 1;
 const TAB_PROFILE = 2;
 const TAB_BAR_INSET = 112;
+// 毛玻璃参数：半透明米色底（ARGB 8 位，前两位为不透明度）+ 背景模糊半径
+// 顶部标题栏整条通栏模糊；底部只有导航胶囊自身模糊
+const BLUR_BAR_BG = '#CCF7F4EE';
+const TAB_BAR_BG = '#CCFFFDF7';
+const BLUR_RADIUS = 20;
+const TAB_BAR_HEIGHT = 56;
+const TAB_BAR_MARGIN = 16;
 // 书架内容筛选：全部 / 文本书 / 图片书
 const FILTER_ALL = 0;
 const FILTER_TEXT = 1;
@@ -42,6 +49,8 @@ struct Index {
   @State newGroupName: string = '';
   @State topInset: number = 0;
   @State bottomInset: number = 0;
+  // 顶部浮动栏实测高度：内容区用它做首屏留白，滚动后内容才能滑进模糊区
+  @State topBarHeight: number = 0;
 
   private appContext(): common.UIAbilityContext {
     return this.getUIContext().getHostContext() as common.UIAbilityContext;
@@ -302,6 +311,14 @@ struct Index {
 
   private tabBarInset(): number {
     return this.bottomInset + TAB_BAR_INSET;
+  }
+
+  /**
+   * 内容区顶部留白：优先用顶部模糊栏的实测高度。
+   * 首帧还没测到时用估算值兜底，避免内容一瞬间被状态栏/标题压住再跳下来。
+   */
+  private topGapHeight(): number {
+    return this.topBarHeight > 0 ? this.topBarHeight : this.topInset + 130;
   }
 
   private toast(message: string): void {
@@ -1195,7 +1212,7 @@ struct Index {
     .layoutWeight(1)
     .justifyContent(FlexAlign.Center)
     .alignItems(HorizontalAlign.Center)
-    .padding({ left: 28, right: 28, bottom: this.tabBarInset() - 30 })
+    .padding({ left: 28, right: 28, top: this.topGapHeight(), bottom: this.tabBarInset() - 30 })
   }
 
   @Builder
@@ -1285,107 +1302,143 @@ struct Index {
     }
     .width('80%')
     .constraintSize({ maxWidth: 380 })
-    .height(56)
+    .height(TAB_BAR_HEIGHT)
     .padding(4)
     .borderRadius(28)
-    .backgroundColor('#F5FFFDF7')
+    // 半透明底色 + 背景模糊：只有这根导航胶囊是毛玻璃，其余内容不遮
+    .backgroundColor(TAB_BAR_BG)
+    .backdropBlur(BLUR_RADIUS)
     .border({ width: 1, color: '#EFE7D8' })
     .shadow({ radius: 22, color: '#268B5E3C', offsetX: 0, offsetY: 8 })
-    .margin({ bottom: this.bottomInset + 16 })
+    .margin({ bottom: this.bottomInset + TAB_BAR_MARGIN })
     .blur(this.managing ? 8 : 0)
+  }
+
+  /**
+   * 顶部毛玻璃栏：标题行 + 筛选胶囊。
+   * 通栏覆盖内容区，书架内容上滑时会从它下方经过并被模糊。
+   * 实测高度写给 topBarHeight，供内容区做首屏留白。
+   */
+  @Builder
+  topBar() {
+    Column() {
+      Row() {
+        if (this.selecting) {
+          Text('取消')
+            .fontSize(15)
+            .fontColor('#8B5E3C')
+            .padding({ top: 8, bottom: 8, right: 12 })
+            .onClick(() => {
+              this.exitSelect();
+            })
+          Blank()
+          Text(`已选 ${this.selectedIds.length} 本`)
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#2B2B2B')
+          Blank()
+          Text(this.allSelected() ? '取消全选' : '全选')
+            .fontSize(14)
+            .fontColor('#8B5E3C')
+            .padding({ left: 8, right: 8, top: 8, bottom: 8 })
+            .onClick(() => {
+              this.toggleSelectAll();
+            })
+          Text('分组至')
+            .fontSize(14)
+            .fontColor(this.selectedIds.length > 0 ? '#8B5E3C' : '#C4B69E')
+            .padding({ left: 8, right: 8, top: 8, bottom: 8 })
+            .onClick(() => {
+              this.openGroupSheet();
+            })
+          Button('删除')
+            .type(ButtonType.Capsule)
+            .backgroundColor(this.selectedIds.length > 0 ? '#B23A2E' : '#D9D0C2')
+            .fontColor('#FFF8ED')
+            .fontSize(13)
+            .height(34)
+            .enabled(this.selectedIds.length > 0)
+            .onClick(() => {
+              this.confirmBatchDelete();
+            })
+        } else {
+          Column() {
+            Text(this.tabTitle())
+              .fontSize(28)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#2B2B2B')
+            if (this.tabSubtitle().length > 0) {
+              Text(this.tabSubtitle())
+                .fontSize(12)
+                .fontColor('#9C8C72')
+                .margin({ top: 2 })
+            }
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+
+          if (this.managing) {
+            Text('取消')
+              .fontSize(15)
+              .fontColor('#8B5E3C')
+              .padding({ left: 12, right: 4, top: 8, bottom: 8 })
+              .onClick(() => {
+                this.exitManage();
+              })
+          } else if (this.currentTab === TAB_BOOKSHELF) {
+            this.downloadsButton()
+            this.importMenuButton()
+          }
+        }
+      }
+      .width('100%')
+      .padding({ left: 20, right: 20, top: this.topInset + 18, bottom: 14 })
+      .alignItems(VerticalAlign.Center)
+      .blur(this.managing ? 8 : 0)
+
+      if (this.currentTab === TAB_BOOKSHELF && !this.selecting && this.books.length > 0) {
+        Column({ space: 8 }) {
+          this.filterBar()
+        }
+        .width('100%')
+        .padding({ left: 20, right: 20, bottom: 6 })
+        .blur(this.managing ? 8 : 0)
+      }
+    }
+    .width('100%')
+    .backgroundColor(BLUR_BAR_BG)
+    .backdropBlur(BLUR_RADIUS)
+    // Stack 的 alignContent 是 Bottom，这里必须显式贴到顶边，否则标题栏会掉到底部
+    .position({ x: 0, y: 0 })
+    // 空白处吃掉点击（不穿透到下面的书卡），但滑动仍交给书架列表
+    .hitTestBehavior(HitTestMode.Transparent)
+    .onClick(() => {
+    })
+    .onAreaChange((oldValue: Area, newValue: Area) => {
+      const height = Number(newValue.height);
+      if (height > 0 && Math.abs(height - this.topBarHeight) > 0.5) {
+        this.topBarHeight = height;
+      }
+    })
   }
 
   build() {
     Stack({ alignContent: Alignment.Bottom }) {
       Column() {
-        Row() {
-          if (this.selecting) {
-            Text('取消')
-              .fontSize(15)
-              .fontColor('#8B5E3C')
-              .padding({ top: 8, bottom: 8, right: 12 })
-              .onClick(() => {
-                this.exitSelect();
-              })
-            Blank()
-            Text(`已选 ${this.selectedIds.length} 本`)
-              .fontSize(15)
-              .fontWeight(FontWeight.Medium)
-              .fontColor('#2B2B2B')
-            Blank()
-            Text(this.allSelected() ? '取消全选' : '全选')
-              .fontSize(14)
-              .fontColor('#8B5E3C')
-              .padding({ left: 8, right: 8, top: 8, bottom: 8 })
-              .onClick(() => {
-                this.toggleSelectAll();
-              })
-            Text('分组至')
-              .fontSize(14)
-              .fontColor(this.selectedIds.length > 0 ? '#8B5E3C' : '#C4B69E')
-              .padding({ left: 8, right: 8, top: 8, bottom: 8 })
-              .onClick(() => {
-                this.openGroupSheet();
-              })
-            Button('删除')
-              .type(ButtonType.Capsule)
-              .backgroundColor(this.selectedIds.length > 0 ? '#B23A2E' : '#D9D0C2')
-              .fontColor('#FFF8ED')
-              .fontSize(13)
-              .height(34)
-              .enabled(this.selectedIds.length > 0)
-              .onClick(() => {
-                this.confirmBatchDelete();
-              })
-          } else {
-            Column() {
-              Text(this.tabTitle())
-                .fontSize(28)
-                .fontWeight(FontWeight.Bold)
-                .fontColor('#2B2B2B')
-              if (this.tabSubtitle().length > 0) {
-                Text(this.tabSubtitle())
-                  .fontSize(12)
-                  .fontColor('#9C8C72')
-                  .margin({ top: 2 })
-              }
-            }
-            .layoutWeight(1)
-            .alignItems(HorizontalAlign.Start)
-
-            if (this.managing) {
-              Text('取消')
-                .fontSize(15)
-                .fontColor('#8B5E3C')
-                .padding({ left: 12, right: 4, top: 8, bottom: 8 })
-                .onClick(() => {
-                  this.exitManage();
-                })
-            } else if (this.currentTab === TAB_BOOKSHELF) {
-              this.downloadsButton()
-              this.importMenuButton()
-            }
-          }
-        }
-        .width('100%')
-        .padding({ left: 20, right: 20, top: this.topInset + 18, bottom: 14 })
-        .alignItems(VerticalAlign.Center)
-        .blur(this.managing ? 8 : 0)
-
-        if (this.currentTab === TAB_BOOKSHELF && !this.selecting && this.books.length > 0) {
-          Column({ space: 8 }) {
-            this.filterBar()
-          }
-          .width('100%')
-          .padding({ left: 20, right: 20, bottom: 6 })
-          .blur(this.managing ? 8 : 0)
-        }
-
         if (this.currentTab === TAB_BOOKSHELF) {
           if (this.gridCount() === 0) {
             this.emptyState()
           } else {
             Grid() {
+              // 首屏留白：与顶部模糊栏等高的一整行（3 列各占一格），
+              // 让内容初始从模糊栏下方开始；滚动后这行会滑出屏幕，书籍才能滑进模糊区
+              ForEach([0, 1, 2], (index: number) => {
+                GridItem() {
+                  Column()
+                    .width('100%')
+                    .height(this.topGapHeight())
+                }
+              }, (index: number) => `top_gap_${index}`)
               ForEach(this.groups, (name: string) => {
                 GridItem() {
                   this.groupGridCard(name)
@@ -1443,18 +1496,20 @@ struct Index {
             .columnsGap(12)
             .width('100%')
             .layoutWeight(1)
-            .padding({ left: 20, right: 20, top: 6, bottom: this.tabBarInset() })
+            .padding({ left: 20, right: 20, bottom: this.bottomInset + 24 })
             .scrollBar(BarState.Off)
           }
         } else if (this.currentTab === TAB_DISCOVER) {
           DiscoverPanel()
         } else {
-          ProfilePanel({ bottomInset: this.tabBarInset() })
+          // 底部留白与书架一致：内容滚到底也能穿过导航胶囊，被毛玻璃糊掉
+          ProfilePanel({ bottomInset: this.bottomInset + 24, topInset: this.topGapHeight() })
         }
       }
       .width('100%')
       .height('100%')
 
+      this.topBar()
       this.tabBar()
 
       if (this.groupSheetVisible) {
