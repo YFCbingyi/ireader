@@ -142,6 +142,11 @@ struct Index {
 
   /** 打开分组的独立页面（书籍不在书架里重复展示） */
   private async openGroupPage(group: string): Promise<void> {
+    // 管理态下点分组卡只当作「点其他地方」：先退出选中，不跳页
+    if (this.managing) {
+      this.exitManage();
+      return;
+    }
     const params = new GroupParams();
     params.group = group;
     this.exitSelect();
@@ -1364,15 +1369,8 @@ struct Index {
           .layoutWeight(1)
           .alignItems(HorizontalAlign.Start)
 
-          if (this.managing) {
-            Text('取消')
-              .fontSize(15)
-              .fontColor('#8B5E3C')
-              .padding({ left: 12, right: 4, top: 8, bottom: 8 })
-              .onClick(() => {
-                this.exitManage();
-              })
-          } else if (this.currentTab === TAB_BOOKSHELF) {
+          // 管理态下不再提供「取消」按钮：点弹窗外部即可退出，右上角留给书架图标按钮
+          if (!this.managing && this.currentTab === TAB_BOOKSHELF) {
             this.downloadsButton()
             this.importMenuButton()
           }
@@ -1400,6 +1398,10 @@ struct Index {
     // 空白处吃掉点击（不穿透到下面的书卡），但滑动仍交给书架列表
     .hitTestBehavior(HitTestMode.Transparent)
     .onClick(() => {
+      // 点顶部栏空白也退出管理态
+      if (this.managing) {
+        this.exitManage();
+      }
     })
     .onAreaChange((oldValue: Area, newValue: Area) => {
       const height = Number(newValue.height);
@@ -1430,6 +1432,9 @@ struct Index {
                 GridItem() {
                   this.groupGridCard(name)
                 }
+                // 管理态下分组卡属于「其余内容」：与书卡一样雾化，否则只有书被处理、分组看着还是亮的
+                .blur(this.managing ? 8 : 0)
+                .opacity(this.managing ? 0.5 : 1)
               }, (name: string) => `group_${name}_${this.groupCount(name)}`)
               ForEach(this.visibleBooks(), (item: BookMeta) => {
                 GridItem() {
@@ -1472,9 +1477,16 @@ struct Index {
                     placement: Placement.Bottom,
                     popupColor: '#FDFBF7',
                     enableArrow: false,
-                    autoCancel: false,
+                    // 点外部即收起弹窗，再由 onStateChange 同步退出管理态。
+                    // 注意：autoCancel 为 false 时弹窗的遮障层会吞掉外部点击，页面里的 onClick 收不到。
+                    autoCancel: true,
                     radius: 18,
-                    shadow: ShadowStyle.OUTER_DEFAULT_MD
+                    shadow: ShadowStyle.OUTER_DEFAULT_MD,
+                    onStateChange: (event) => {
+                      if (!event.isVisible && this.managing) {
+                        this.exitManage();
+                      }
+                    }
                   })
                 }
               }, (item: BookMeta) => `${item.id}_${item.updatedAt}_${item.group}`)
@@ -1485,6 +1497,12 @@ struct Index {
             .layoutWeight(1)
             .padding({ left: 20, right: 20, bottom: this.bottomInset + 24 })
             .scrollBar(BarState.Off)
+            // 点网格空白处退出管理态（书卡与分组卡各自消费自己的点击）
+            .onClick(() => {
+              if (this.managing) {
+                this.exitManage();
+              }
+            })
           }
         } else if (this.currentTab === TAB_DISCOVER) {
           DiscoverPanel()
