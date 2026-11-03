@@ -1,12 +1,22 @@
 import { BookMeta, BookType } from '../model/BookModels';
 
-const TITLE_CHARS_PER_LINE = 6;
+// 封面书名文字区：字号 14，字体框宽度以实测为准
+const TITLE_FONT_SIZE = 14;
+const TITLE_LINE_HEIGHT = 20;
+// 封面下方的书名标签：字号 13，最多两行，行高固定以便同排卡片对齐
+const LABEL_FONT_SIZE = 13;
+const LABEL_LINE_HEIGHT = 17;
+
 
 @Component
 export struct BookCard {
   @Prop book: BookMeta = new BookMeta();
   @Prop selecting: boolean = false;
   @Prop selected: boolean = false;
+  // 封面书名文字区实测宽度（vp），用来算每行能放几个字
+  @State coverTextWidth: number = 0;
+  // 封面下方书名标签的实测宽度（vp）
+  @State labelWidth: number = 0;
   onOpen: (book: BookMeta) => void = (book: BookMeta): void => {};
   onLongPress: (book: BookMeta) => void = (book: BookMeta): void => {};
   onSelect: (book: BookMeta) => void = (book: BookMeta): void => {};
@@ -15,24 +25,72 @@ export struct BookCard {
     return this.book.title.length === 0 ? '无题' : this.book.title;
   }
 
-  private titleLine(index: number): string {
-    const title = this.displayTitle();
-    const start = index * TITLE_CHARS_PER_LINE;
-    if (start >= title.length) {
-      return '';
-    }
-    const rest = title.substring(start);
-    if (rest.length <= TITLE_CHARS_PER_LINE) {
-      return rest;
-    }
-    if (index === 0) {
-      return rest.substring(0, TITLE_CHARS_PER_LINE);
-    }
-    return `${rest.substring(0, TITLE_CHARS_PER_LINE - 1)}…`;
+  /** 单个字符占的宽度：半角按 0.55，全角按 1 */
+  private charUnits(code: number): number {
+    return code < 128 ? 0.55 : 1;
   }
 
-  private hasSecondTitleLine(): boolean {
-    return this.displayTitle().length > TITLE_CHARS_PER_LINE;
+  private textUnits(text: string): number {
+    let units = 0;
+    for (let i = 0; i < text.length; i++) {
+      units += this.charUnits(text.charCodeAt(i));
+    }
+    return units;
+  }
+
+  /** 一行能放多少宽度单位：按实测宽度和字号换算，宽度未知时给个保守值 */
+  private lineCapacity(width: number, fontSize: number, padding: number): number {
+    const inner = width - padding;
+    if (inner <= 0) {
+      return 5;
+    }
+    return Math.max(3, Math.floor(inner / fontSize));
+  }
+
+  /** 取宽度不超过 maxUnits 的最长前缀 */
+  private fitPrefix(text: string, maxUnits: number): string {
+    let units = 0;
+    let cut = 0;
+    for (let i = 0; i < text.length; i++) {
+      const unit = this.charUnits(text.charCodeAt(i));
+      if (units + unit > maxUnits) {
+        break;
+      }
+      units += unit;
+      cut = i + 1;
+    }
+    return text.substring(0, cut);
+  }
+
+  /**
+   * 封面书名排版：最多两行。
+   * 切点按实测宽度算，且末行不留 1~2 个字的孤字，
+   * 例如「工藤新一的日本后」切成「工藤新一的 / 日本后」，而不是「工藤新一的日 / 本后」。
+   */
+  private splitTitleLines(title: string, capacity: number): string[] {
+    if (this.textUnits(title) <= capacity) {
+      return [title];
+    }
+    let cut = this.fitPrefix(title, capacity).length;
+    while (cut > 1 && this.textUnits(title.substring(cut)) < 3) {
+      cut--;
+    }
+    const head = title.substring(0, cut);
+    const rest = title.substring(cut);
+    if (this.textUnits(rest) <= capacity) {
+      return [head, rest];
+    }
+    return [head, `${this.fitPrefix(rest, capacity - 1)}…`];
+  }
+
+  private coverTitleLines(): string[] {
+    return this.splitTitleLines(this.displayTitle(),
+      this.lineCapacity(this.coverTextWidth, TITLE_FONT_SIZE, 12));
+  }
+
+  private labelTitleLines(): string[] {
+    return this.splitTitleLines(this.displayTitle(),
+      this.lineCapacity(this.labelWidth, LABEL_FONT_SIZE, 0));
   }
 
   private progressText(): string {
@@ -92,24 +150,16 @@ export struct BookCard {
           .borderRadius(6)
 
         Column() {
-          Text(this.titleLine(0))
-            .width('100%')
-            .fontSize(14)
-            .fontWeight(FontWeight.Medium)
-            .fontColor('#FFF8ED')
-            .lineHeight(20)
-            .maxLines(1)
-            .textAlign(TextAlign.Center)
-          if (this.hasSecondTitleLine()) {
-            Text(this.titleLine(1))
+          ForEach(this.coverTitleLines(), (line: string, index: number) => {
+            Text(line)
               .width('100%')
-              .fontSize(14)
+              .fontSize(TITLE_FONT_SIZE)
               .fontWeight(FontWeight.Medium)
               .fontColor('#FFF8ED')
-              .lineHeight(20)
+              .lineHeight(TITLE_LINE_HEIGHT)
               .maxLines(1)
               .textAlign(TextAlign.Center)
-          }
+          }, (line: string, index: number) => `title_${index}_${line}`)
           Column()
             .width(24)
             .height(1)
@@ -120,6 +170,12 @@ export struct BookCard {
         .padding({ left: 6, right: 6 })
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
+        .onAreaChange((oldValue: Area, newValue: Area) => {
+          const width = Number(newValue.width);
+          if (width > 0 && Math.abs(width - this.coverTextWidth) > 0.5) {
+            this.coverTextWidth = width;
+          }
+        })
 
         if (!this.selecting) {
           Stack({ alignContent: Alignment.TopEnd }) {
@@ -176,14 +232,27 @@ export struct BookCard {
       Column() {
         this.bookCover()
 
-        Text(this.book.title)
-          .width('100%')
-          .fontSize(14)
-          .fontWeight(FontWeight.Medium)
-          .fontColor('#2B2B2B')
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .margin({ top: 8 })
+        // 书名最多两行：切点按实测宽度算，末行不留孤字；固定两行高度保证同排卡片进度行对齐
+        Column() {
+          ForEach(this.labelTitleLines(), (line: string, index: number) => {
+            Text(line)
+              .width('100%')
+              .fontSize(LABEL_FONT_SIZE)
+              .lineHeight(LABEL_LINE_HEIGHT)
+              .fontWeight(FontWeight.Medium)
+              .fontColor('#2B2B2B')
+              .maxLines(1)
+          }, (line: string, index: number) => `label_${index}_${line}`)
+        }
+        .width('100%')
+        .constraintSize({ minHeight: LABEL_LINE_HEIGHT * 2 })
+        .margin({ top: 8 })
+        .onAreaChange((oldValue: Area, newValue: Area) => {
+          const width = Number(newValue.width);
+          if (width > 0 && Math.abs(width - this.labelWidth) > 0.5) {
+            this.labelWidth = width;
+          }
+        })
 
         Text(this.progressText())
           .width('100%')
