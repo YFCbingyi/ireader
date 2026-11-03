@@ -7,6 +7,7 @@ import { ReadingStatsStore } from '../service/ReadingStatsStore';
 @Component
 export struct ProfilePanel {
   bottomInset: number = 30;
+  topInset: number = 0;
 
   @State totalText: string = '0 秒';
   @State todayText: string = '0 秒';
@@ -161,7 +162,7 @@ export struct ProfilePanel {
           .margin({ top: 16 })
       }
       .width('100%')
-      .padding({ left: 20, right: 20, top: 4, bottom: this.bottomInset })
+      .padding({ left: 20, right: 20, top: this.topInset + 4, bottom: this.bottomInset })
     }
     .layoutWeight(1)
     .width('100%')
