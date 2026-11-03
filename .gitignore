@@ -20,3 +20,5 @@ testdata/images_with_chapters/
 
 # 签名配置：含本机证书绝对路径与明文密码，不入库（模板见 build-profile.json5.example）
 /build-profile.json5
+reference_ui/
+readerkit_samplecode_arkts/
