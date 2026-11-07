@@ -54,12 +54,13 @@ entry/src/main/ets/
 │   ├── AnnotationStore.ets   # 划线/想法的逐书 JSON 读写与查找
 │   ├── LibraryStore.ets      # 书架/清单/设置/书签的 JSON 读写
 │   ├── ReadingStatsStore.ets # 阅读时长累计（日期键 / clear）
-│   ├── ProfileStats.ets      # 「我的」页派生统计：连续天数 / 13 周热力图 / 书架概览
+│   ├── ProfileStats.ets      # 「我的」页派生统计：连续天数 / 13 周热力图 / 书架概览 / 笔记聚合
+│   ├── BackupService.ets     # 阅读数据导出：书架 / 设置 / 统计 / 逐书书签与划线
 │   └── (无 EdgeTurnTracker —— 已删除)
 ├── components/
 │   ├── BookCard.ets          # 书架卡片
 │   ├── DiscoverPanel.ets     # 发现页占位
-│   ├── ProfilePanel.ets      # 「我的」页：时长 / 继续阅读 / 习惯统计 / 13 周热力图 / 设置区
+│   ├── ProfilePanel.ets      # 「我的」页：时长 / 继续阅读 / 习惯统计 / 热力图 / 笔记 / 设置与备份
 │   └── reader/
 │       ├── TextReaderView.ets   # 文本书：竖排块窗口 + 左右页窗口
 │       ├── ImageReaderView.ets  # 图片书：竖排图片块窗口 + 左右图片页窗口
@@ -71,7 +72,7 @@ entry/src/main/ets/
 │   └── Profile.ets           # 个人页容器
 ├── utils/
 │   ├── AppPaths.ets          # filesDir 初始化、相对/绝对路径与 uri 换算
-│   ├── FileUtil.ets          # 同步/异步文件 IO
+│   ├── FileUtil.ets          # 同步/异步文件 IO（含 picker uri 写入 / 目录占用统计）
 │   └── NaturalSort.ets       # 文件名自然排序（图片章序）
 └── entryability/EntryAbility.ets  # 写 systemColorMode / appActive 到 AppStorage
 ```
@@ -326,7 +327,8 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 - 打开时以 `progress.chapterIndex + charOffset` 作为窗口中心；竖排走 `initWindow`，左右走 `initPageWindow`，图片书走 `initWindow/reloadAt`。
 - 书签记录 `chapterIndex + charOffset + pageIndex + scrollRatio + preview`；`updateBookmarkState()` 按"同章 + 同偏移/同页"判断当前是否已加书签。
 - 阅读时长另由 `ReadingStatsStore` 按 30s 心跳累计，与进度链路解耦。
-- 「我的」页（`ProfilePanel`）不新增持久化：连续天数 / 最长连续 / 本周合计 / 日均 / 单日最长由 `reading_stats.json` 派生（`ProfileStats.habit`），13 周热力图同源；书架概览由 `library.json` 及 `annotations/`、`bookmarks/` 目录派生。`Index.onPageShow` 递增 `profileRefresh` 传给 `ProfilePanel`，保证从阅读页返回后统计即时刷新；`ReadingStatsStore.clear()` 只清空计时数据，不动书籍 / 进度 / 书签 / 划线。
+- 「我的」页（`ProfilePanel`）不新增持久化：连续天数 / 最长连续 / 本周合计 / 日均 / 单日最长由 `reading_stats.json` 派生（`ProfileStats.habit`），13 周热力图同源；书架概览由 `library.json` 及 `annotations/`、`bookmarks/` 目录派生。需逐书读盘的笔记聚合与沙箱占用统计放在 `setTimeout` 里首帧后算（`scheduleSlowData`）。`Index.onPageShow` 递增 `profileRefresh` 传给 `ProfilePanel`，保证从阅读页返回后统计即时刷新；`ReadingStatsStore.clear()` 只清空计时数据，不动书籍 / 进度 / 书签 / 划线。
+- 最近笔记点击时给 `ReaderParams` 带上 `jumpChapter / jumpOffset`，`Reader.aboutToAppear` 用它们覆盖上次进度后调 `openChapter`，实现跳回划线位置；旧调用不传这两个字段（默认 -1）行为不变。设置区「导出备份」用 `picker.DocumentViewPicker.save()` 拿用户选定的 uri，再由 `FileUtil.writeUriText` 写入 `BackupService.buildJson()`；备份只含书架元数据 / 设置 / 统计 / 书签 / 划线，**不含书籍正文与图片**，按 `bookId` 分组便于日后恢复。
 
 ## 11. 关键不变量（改代码前必读）
 

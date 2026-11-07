@@ -1,7 +1,10 @@
+import { Annotation, AnnotationKind } from '../model/Annotation';
 import { BookMeta } from '../model/BookModels';
 import { DailyReading, ReadingStats } from '../model/ReadingStats';
 import { AppPaths } from '../utils/AppPaths';
 import { FileUtil } from '../utils/FileUtil';
+import { AnnotationStore } from './AnnotationStore';
+import { LibraryStore } from './LibraryStore';
 import { ReadingStatsStore } from './ReadingStatsStore';
 
 /** 阅读习惯聚合：全部由 reading_stats.json 派生，不新增持久化字段 */
@@ -37,6 +40,26 @@ export class ShelfSummary {
   groupCount: number = 0;
   noteFileCount: number = 0;
   bookmarkFileCount: number = 0;
+}
+
+/** 最近笔记列表里的一行，点击后按 bookId + 章内偏移跳回原文 */
+export class NoteEntry {
+  id: string = '';
+  bookId: string = '';
+  bookTitle: string = '';
+  chapterIndex: number = 0;
+  charOffset: number = 0;
+  kind: number = 0;
+  quote: string = '';
+  note: string = '';
+  createdAt: number = 0;
+}
+
+export class NoteSummary {
+  highlightCount: number = 0;
+  noteCount: number = 0;
+  bookmarkCount: number = 0;
+  recent: NoteEntry[] = [];
 }
 
 /** 「我的」页取数层：只做计算与读盘，UI 组件不直接碰日期换算 */
@@ -150,6 +173,41 @@ export class ProfileStats {
     return result;
   }
 
+  /** 逐书聚合划线 / 想法 / 书签，并按时间取最近 3 条笔记（读盘较多，调用方应异步调度） */
+  static notes(books: BookMeta[]): NoteSummary {
+    const result = new NoteSummary();
+    const entries: NoteEntry[] = [];
+    for (let i = 0; i < books.length; i++) {
+      const book = books[i];
+      result.bookmarkCount += LibraryStore.getBookmarks(book.id).length;
+      const list = AnnotationStore.load(book.id);
+      for (let j = 0; j < list.length; j++) {
+        const annotation: Annotation = list[j];
+        const entry = new NoteEntry();
+        entry.id = annotation.id;
+        entry.bookId = book.id;
+        entry.bookTitle = book.title.length > 0 ? book.title : '无题';
+        entry.chapterIndex = annotation.chapterIndex;
+        entry.charOffset = annotation.start;
+        entry.kind = annotation.kind === AnnotationKind.NOTE ? 1 : 0;
+        entry.quote = ProfileStats.snippet(annotation.text, 32);
+        entry.note = ProfileStats.snippet(annotation.note, 24);
+        entry.createdAt = annotation.createdAt;
+        if (entry.kind === 1) {
+          result.noteCount++;
+        } else {
+          result.highlightCount++;
+        }
+        entries.push(entry);
+      }
+    }
+    entries.sort((a: NoteEntry, b: NoteEntry): number => b.createdAt - a.createdAt);
+    for (let i = 0; i < entries.length && result.recent.length < 3; i++) {
+      result.recent.push(entries[i]);
+    }
+    return result;
+  }
+
   /** 最近在读：优先找有进度且未读完的一本，其次退回最近更新的书 */
   static continueBook(books: BookMeta[]): BookMeta | undefined {
     for (let i = 0; i < books.length; i++) {
@@ -196,6 +254,11 @@ export class ProfileStats {
 
   private static oneDecimal(value: number): number {
     return Math.round(value * 10) / 10;
+  }
+
+  private static snippet(text: string, max: number): string {
+    const plain = text.split(new RegExp('\\s+')).join(' ').trim();
+    return plain.length > max ? `${plain.substring(0, max)}…` : plain;
   }
 
   private static secondsOf(days: DailyReading[], key: string): number {

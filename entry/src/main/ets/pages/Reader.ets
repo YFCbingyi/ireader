@@ -136,8 +136,16 @@ struct Reader {
     AppBootstrap.init(context);
     const raw = this.getUIContext().getRouter().getParams();
     const params = raw as ReaderParams;
+    let jumpChapter = -1;
+    let jumpOffset = 0;
     if (params !== undefined && params !== null && params.bookId !== undefined) {
       this.bookId = params.bookId;
+      if (params.jumpChapter !== undefined) {
+        jumpChapter = params.jumpChapter;
+      }
+      if (params.jumpOffset !== undefined) {
+        jumpOffset = params.jumpOffset;
+      }
     }
     if (this.bookId.length === 0) {
       this.errorText = '未找到书籍';
@@ -185,8 +193,17 @@ struct Reader {
     if (savedChapter >= this.manifest.chapters.length) {
       savedChapter = this.manifest.chapters.length - 1;
     }
-    await this.openChapter(savedChapter, this.book.progress.charOffset, this.book.progress.pageIndex,
-      this.book.progress.scrollRatio, false);
+    let savedOffset = this.book.progress.charOffset;
+    let savedPageIndex = this.book.progress.pageIndex;
+    let savedRatio = this.book.progress.scrollRatio;
+    // 从「我的」页点最近笔记进入时，覆盖上次进度，直接落到划线所在位置
+    if (jumpChapter >= 0 && jumpChapter < this.manifest.chapters.length) {
+      savedChapter = jumpChapter;
+      savedOffset = jumpOffset;
+      savedPageIndex = 0;
+      savedRatio = 0;
+    }
+    await this.openChapter(savedChapter, savedOffset, savedPageIndex, savedRatio, false);
     this.loading = false;
     this.startReadingSession();
   }

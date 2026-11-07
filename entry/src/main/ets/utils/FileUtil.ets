@@ -207,6 +207,16 @@ export class FileUtil {
    * 会导致 library/settings/bookmarks/annotations 整文件丢失。
    * 同目录 rename 是原子替换；仅当平台返回失败时才回退为直接覆盖写。
    */
+  /** 把文本写入 picker.save() 返回的 uri（该 uri 带临时写授权） */
+  static writeUriText(uri: string, content: string): void {
+    const file = fs.openSync(uri, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+    try {
+      fs.writeSync(file.fd, content);
+    } finally {
+      fs.closeSync(file);
+    }
+  }
+
   static writeTextAtomic(path: string, content: string): void {
     const tempPath = `${path}.tmp`;
     FileUtil.writeText(tempPath, content);
