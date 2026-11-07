@@ -53,12 +53,13 @@ entry/src/main/ets/
 │   ├── ImageMetaReader.ets   # 读取图片宽高，产出 ImageEntry
 │   ├── AnnotationStore.ets   # 划线/想法的逐书 JSON 读写与查找
 │   ├── LibraryStore.ets      # 书架/清单/设置/书签的 JSON 读写
-│   ├── ReadingStatsStore.ets # 阅读时长累计
+│   ├── ReadingStatsStore.ets # 阅读时长累计（日期键 / clear）
+│   ├── ProfileStats.ets      # 「我的」页派生统计：连续天数 / 13 周热力图 / 书架概览
 │   └── (无 EdgeTurnTracker —— 已删除)
 ├── components/
 │   ├── BookCard.ets          # 书架卡片
 │   ├── DiscoverPanel.ets     # 发现页占位
-│   ├── ProfilePanel.ets      # 统计面板
+│   ├── ProfilePanel.ets      # 「我的」页：时长 / 继续阅读 / 习惯统计 / 13 周热力图 / 设置区
 │   └── reader/
 │       ├── TextReaderView.ets   # 文本书：竖排块窗口 + 左右页窗口
 │       ├── ImageReaderView.ets  # 图片书：竖排图片块窗口 + 左右图片页窗口
@@ -325,6 +326,7 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 - 打开时以 `progress.chapterIndex + charOffset` 作为窗口中心；竖排走 `initWindow`，左右走 `initPageWindow`，图片书走 `initWindow/reloadAt`。
 - 书签记录 `chapterIndex + charOffset + pageIndex + scrollRatio + preview`；`updateBookmarkState()` 按"同章 + 同偏移/同页"判断当前是否已加书签。
 - 阅读时长另由 `ReadingStatsStore` 按 30s 心跳累计，与进度链路解耦。
+- 「我的」页（`ProfilePanel`）不新增持久化：连续天数 / 最长连续 / 本周合计 / 日均 / 单日最长由 `reading_stats.json` 派生（`ProfileStats.habit`），13 周热力图同源；书架概览由 `library.json` 及 `annotations/`、`bookmarks/` 目录派生。`Index.onPageShow` 递增 `profileRefresh` 传给 `ProfilePanel`，保证从阅读页返回后统计即时刷新；`ReadingStatsStore.clear()` 只清空计时数据，不动书籍 / 进度 / 书签 / 划线。
 
 ## 11. 关键不变量（改代码前必读）
 

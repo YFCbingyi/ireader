@@ -104,6 +104,11 @@ export class ReadingStatsStore {
     return days;
   }
 
+  /** 清空全部计时数据；书籍、进度、书签、划线均不受影响 */
+  static clear(): void {
+    FileUtil.writeTextAtomic(ReadingStatsStore.path(), JSON.stringify(new ReadingStats()));
+  }
+
   static formatDuration(seconds: number): string {
     const total = Math.max(0, Math.floor(seconds));
     if (total < 60) {
@@ -140,7 +145,8 @@ export class ReadingStatsStore {
     return ReadingStatsStore.keyOf(new Date());
   }
 
-  private static keyOf(date: Date): string {
+  /** 日期键，供「我的」页做连续天数与热力图的日期对齐 */
+  static keyOf(date: Date): string {
     const month = date.getMonth() + 1;
     const day = date.getDate();
     return `${date.getFullYear()}-${month < 10 ? '0' : ''}${month}-${day < 10 ? '0' : ''}${day}`;
