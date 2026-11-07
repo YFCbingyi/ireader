@@ -1,4 +1,6 @@
+import { ConfigurationConstant } from '@kit.AbilityKit';
 import { BookMeta, BookType } from '../model/BookModels';
+import { ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
 
 // 封面书名文字区：字号 14，字体框宽度以实测为准
 const TITLE_FONT_SIZE = 14;
@@ -20,6 +22,25 @@ export struct BookCard {
   onOpen: (book: BookMeta) => void = (book: BookMeta): void => {};
   onLongPress: (book: BookMeta) => void = (book: BookMeta): void => {};
   onSelect: (book: BookMeta) => void = (book: BookMeta): void => {};
+  // 深色模式：卡片自身的书名/进度/选择圈跟随主题，封面美术不跟随
+  @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
+    ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
+  @State palette: ShelfThemeColors = ShelfTheme.light();
+
+  aboutToAppear(): void {
+    this.applyPalette();
+  }
+
+  private applyPalette(): void {
+    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
+    if (next.bg !== this.palette.bg) {
+      this.palette = next;
+    }
+  }
+
+  private onSystemColorModeChanged(): void {
+    this.applyPalette();
+  }
 
   private displayTitle(): string {
     return this.book.title.length === 0 ? '无题' : this.book.title;
@@ -217,14 +238,14 @@ export struct BookCard {
       Column()
         .width(5)
         .height('100%')
-        .backgroundColor('#F4EFE3')
+        .backgroundColor(this.palette.surfaceSink)
     }
     .width('100%')
     .aspectRatio(0.72)
     .borderRadius(10)
     .clip(true)
     .draggable(false)
-    .shadow({ radius: 10, color: '#33000000', offsetX: 0, offsetY: 4 })
+    .shadow({ radius: 10, color: this.palette.shadow, offsetX: 0, offsetY: 4 })
   }
 
   build() {
@@ -240,7 +261,7 @@ export struct BookCard {
               .fontSize(LABEL_FONT_SIZE)
               .lineHeight(LABEL_LINE_HEIGHT)
               .fontWeight(FontWeight.Medium)
-              .fontColor('#2B2B2B')
+              .fontColor(this.palette.text)
               .maxLines(1)
           }, (line: string, index: number) => `label_${index}_${line}`)
         }
@@ -257,7 +278,7 @@ export struct BookCard {
         Text(this.progressText())
           .width('100%')
           .fontSize(11)
-          .fontColor('#8C8C8C')
+          .fontColor(this.palette.subText)
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ top: 2 })
@@ -279,14 +300,14 @@ export struct BookCard {
           Circle()
             .width(24)
             .height(24)
-            .fill(this.selected ? '#8B5E3C' : '#F2FFFDF7')
-            .stroke(this.selected ? '#8B5E3C' : '#B9AD9C')
+            .fill(this.selected ? this.palette.accent : this.palette.chipBg)
+            .stroke(this.selected ? this.palette.accent : this.palette.subtleText)
             .strokeWidth(1.5)
           if (this.selected) {
             Text('✓')
               .fontSize(15)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#FFF8ED')
+              .fontColor(this.palette.accentText)
           }
         }
         .width(24)
