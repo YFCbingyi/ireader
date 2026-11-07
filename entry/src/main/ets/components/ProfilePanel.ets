@@ -1,5 +1,6 @@
-import { common } from '@kit.AbilityKit';
+import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { DailyReading } from '../model/ReadingStats';
+import { ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
 import { AppBootstrap } from '../service/AppBootstrap';
 import { LibraryStore } from '../service/LibraryStore';
 import { ReadingStatsStore } from '../service/ReadingStatsStore';
@@ -15,10 +16,25 @@ export struct ProfilePanel {
   @State bookCount: number = 0;
   @State week: DailyReading[] = [];
   @State todayKey: string = '';
+  @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
+    ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
+  @State palette: ShelfThemeColors = ShelfTheme.light();
 
   aboutToAppear(): void {
     AppBootstrap.init(this.getUIContext().getHostContext() as common.UIAbilityContext);
+    this.applyPalette();
     this.loadStats();
+  }
+
+  private applyPalette(): void {
+    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
+    if (next.bg !== this.palette.bg) {
+      this.palette = next;
+    }
+  }
+
+  private onSystemColorModeChanged(): void {
+    this.applyPalette();
   }
 
   private loadStats(): void {
@@ -63,10 +79,10 @@ export struct ProfilePanel {
       Text(value)
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
-        .fontColor('#2B2B2B')
+        .fontColor(this.palette.text)
       Text(label)
         .fontSize(12)
-        .fontColor('#9C8C72')
+        .fontColor(this.palette.subtleText)
         .margin({ top: 4 })
     }
     .layoutWeight(1)
@@ -79,60 +95,60 @@ export struct ProfilePanel {
         Column() {
           Text('累计阅读时长')
             .fontSize(13)
-            .fontColor('#9C8C72')
+            .fontColor(this.palette.subtleText)
           Text(this.totalText)
             .fontSize(34)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#8B5E3C')
+            .fontColor(this.palette.accent)
             .margin({ top: 8 })
           Text(`今日 ${this.todayText}`)
             .fontSize(13)
-            .fontColor('#5C4A32')
+            .fontColor(this.palette.chipText)
             .margin({ top: 6 })
         }
         .width('100%')
         .alignItems(HorizontalAlign.Start)
         .padding(20)
         .borderRadius(16)
-        .backgroundColor('#FFFDF7')
-        .border({ width: 1, color: '#EFE7D8' })
+        .backgroundColor(this.palette.surface)
+        .border({ width: 1, color: this.palette.chipBg })
 
         Row() {
           this.statCell('阅读天数', `${this.readDayCount} 天`)
           Divider()
             .vertical(true)
             .height(32)
-            .color('#EFE7D8')
+            .color(this.palette.chipBg)
           this.statCell('书架书籍', `${this.bookCount} 本`)
         }
         .width('100%')
         .padding({ top: 16, bottom: 16 })
         .margin({ top: 12 })
         .borderRadius(16)
-        .backgroundColor('#FFFDF7')
-        .border({ width: 1, color: '#EFE7D8' })
+        .backgroundColor(this.palette.surface)
+        .border({ width: 1, color: this.palette.chipBg })
 
         Column() {
           Text('最近 7 天')
             .width('100%')
             .fontSize(13)
-            .fontColor('#9C8C72')
+            .fontColor(this.palette.subtleText)
 
           Row() {
             ForEach(this.week, (item: DailyReading) => {
               Column() {
                 Text(this.barText(item))
                   .fontSize(10)
-                  .fontColor('#A8A8A8')
+                  .fontColor(this.palette.subtleText)
                   .margin({ bottom: 6 })
                 Column()
                   .width(16)
                   .height(this.barHeight(item))
                   .borderRadius(5)
-                  .backgroundColor(item.seconds > 0 ? '#8B5E3C' : '#E7E2D6')
+                  .backgroundColor(item.seconds > 0 ? this.palette.accent : this.palette.border)
                 Text(item.date === this.todayKey ? '今天' : ReadingStatsStore.dayLabel(item.date))
                   .fontSize(11)
-                  .fontColor(item.date === this.todayKey ? '#8B5E3C' : '#A8A8A8')
+                  .fontColor(item.date === this.todayKey ? this.palette.accent : this.palette.subtleText)
                   .margin({ top: 6 })
               }
               .layoutWeight(1)
@@ -149,13 +165,13 @@ export struct ProfilePanel {
         .padding(20)
         .margin({ top: 12 })
         .borderRadius(16)
-        .backgroundColor('#FFFDF7')
-        .border({ width: 1, color: '#EFE7D8' })
+        .backgroundColor(this.palette.surface)
+        .border({ width: 1, color: this.palette.chipBg })
 
         Text('阅读时长按页面停留累计，应用进入后台或退出阅读页后停止计时。')
           .width('100%')
           .fontSize(11)
-          .fontColor('#A8A8A8')
+          .fontColor(this.palette.subtleText)
           .lineHeight(18)
           .margin({ top: 16 })
       }

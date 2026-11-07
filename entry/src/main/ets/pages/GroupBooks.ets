@@ -1,5 +1,6 @@
-import { common } from '@kit.AbilityKit';
+import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { BookMeta, GroupParams, ReaderParams } from '../model/BookModels';
+import { ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
 import { SelectionUtil } from '../utils/SelectionUtil';
 import { WindowUtil } from '../utils/WindowUtil';
 import { AppBootstrap } from '../service/AppBootstrap';
@@ -22,9 +23,25 @@ struct GroupBooks {
   @State groupDraft: string = '';
   @State topInset: number = 0;
   @State bottomInset: number = 0;
+  // 深色模式：与书架首页共用同一套色板，避免深色下进分组页底色仍是浅米色
+  @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
+    ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
+  @State palette: ShelfThemeColors = ShelfTheme.light();
+
+  private applyPalette(): void {
+    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
+    if (next.bg !== this.palette.bg) {
+      this.palette = next;
+    }
+  }
+
+  private onSystemColorModeChanged(): void {
+    this.applyPalette();
+  }
 
   aboutToAppear(): void {
     AppBootstrap.init(this.getUIContext().getHostContext() as common.UIAbilityContext);
+    this.applyPalette();
     const raw = this.getUIContext().getRouter().getParams();
     const params = raw as GroupParams;
     if (params !== undefined && params !== null && params.group !== undefined) {
@@ -227,13 +244,13 @@ struct GroupBooks {
     Column() {
       Column({ space: 5 }) {
         Row({ space: 5 }) {
-          Circle().width(5).height(5).fill('#5C4A32')
-          Circle().width(5).height(5).fill('#5C4A32')
+          Circle().width(5).height(5).fill(this.palette.chipText)
+          Circle().width(5).height(5).fill(this.palette.chipText)
         }
 
         Row({ space: 5 }) {
-          Circle().width(5).height(5).fill('#5C4A32')
-          Circle().width(5).height(5).fill('#5C4A32')
+          Circle().width(5).height(5).fill(this.palette.chipText)
+          Circle().width(5).height(5).fill(this.palette.chipText)
         }
       }
     }
@@ -242,9 +259,9 @@ struct GroupBooks {
     .justifyContent(FlexAlign.Center)
     .alignItems(HorizontalAlign.Center)
     .borderRadius(19)
-    .backgroundColor('#EFE7D8')
-    .border({ width: 1, color: '#E4D8C4' })
-    .shadow({ radius: 8, color: '#1A8B5E3C', offsetX: 0, offsetY: 2 })
+    .backgroundColor(this.palette.chipBg)
+    .border({ width: 1, color: this.palette.border })
+    .shadow({ radius: 8, color: this.palette.accentShadow, offsetX: 0, offsetY: 2 })
     .bindMenu(this.groupMenu)
   }
 
@@ -253,13 +270,13 @@ struct GroupBooks {
     Stack({ alignContent: Alignment.Center }) {
       Text('‹')
         .fontSize(26)
-        .fontColor('#3A3A3A')
+        .fontColor(this.palette.ink)
         .margin({ bottom: 3 })
     }
     .width(40)
     .height(40)
     .borderRadius(20)
-    .backgroundColor('#EFEAE0')
+    .backgroundColor(this.palette.surfaceSink)
     .onClick(() => {
       this.back();
     })
@@ -272,7 +289,7 @@ struct GroupBooks {
       Text(this.group)
         .fontSize(26)
         .fontWeight(FontWeight.Bold)
-        .fontColor('#2B2B2B')
+        .fontColor(this.palette.text)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .layoutWeight(1)
@@ -289,10 +306,10 @@ struct GroupBooks {
       Text('分组里还没有书')
         .fontSize(20)
         .fontWeight(FontWeight.Bold)
-        .fontColor('#2B2B2B')
+        .fontColor(this.palette.text)
       Text('在书架上长按书籍，选择「分组至」把书放进来')
         .fontSize(13)
-        .fontColor('#8C8C8C')
+        .fontColor(this.palette.subText)
         .margin({ top: 10 })
         .textAlign(TextAlign.Center)
     }
@@ -309,7 +326,7 @@ struct GroupBooks {
       Column()
         .width('100%')
         .height('100%')
-        .backgroundColor('#4D000000')
+        .backgroundColor(this.palette.scrim)
         .onClick(() => {
           this.cancelRename();
         })
@@ -318,7 +335,7 @@ struct GroupBooks {
         Text('重命名分组')
           .fontSize(17)
           .fontWeight(FontWeight.Medium)
-          .fontColor('#2B2B2B')
+          .fontColor(this.palette.text)
           .width('100%')
           .textAlign(TextAlign.Center)
 
@@ -326,8 +343,8 @@ struct GroupBooks {
           TextInput({ placeholder: '分组名称', text: this.groupDraft })
             .maxLength(36)
             .fontSize(15)
-            .fontColor('#2B2B2B')
-            .placeholderColor('#A8A29A')
+            .fontColor(this.palette.text)
+            .placeholderColor(this.palette.subtleText)
             .placeholderFont({ size: 15 })
             .backgroundColor('#00000000')
             .padding({ left: 0, right: 0 })
@@ -339,14 +356,14 @@ struct GroupBooks {
             Blank()
             Text(`${this.groupDraft.length}/36`)
               .fontSize(11)
-              .fontColor('#A8A29A')
+              .fontColor(this.palette.subtleText)
           }
           .width('100%')
 
           Column()
             .width('100%')
             .height(1)
-            .backgroundColor('#DCD5C8')
+            .backgroundColor(this.palette.border)
         }
         .width('100%')
         .margin({ top: 18 })
@@ -354,7 +371,7 @@ struct GroupBooks {
         Row() {
           Text('取消')
             .fontSize(16)
-            .fontColor('#C4553C')
+            .fontColor(this.palette.danger)
             .layoutWeight(1)
             .textAlign(TextAlign.Center)
             .padding({ top: 15, bottom: 15 })
@@ -364,10 +381,10 @@ struct GroupBooks {
           Column()
             .width(1)
             .height(22)
-            .backgroundColor('#E6E0D4')
+            .backgroundColor(this.palette.border)
           Text('确定')
             .fontSize(16)
-            .fontColor(this.groupDraft.trim().length > 0 ? '#2F7D5A' : '#B9C4BC')
+            .fontColor(this.groupDraft.trim().length > 0 ? this.palette.success : this.palette.disabled)
             .layoutWeight(1)
             .textAlign(TextAlign.Center)
             .padding({ top: 15, bottom: 15 })
@@ -381,9 +398,9 @@ struct GroupBooks {
       .width('86%')
       .constraintSize({ maxWidth: 400 })
       .padding({ left: 22, right: 22, top: 22, bottom: 4 })
-      .backgroundColor('#FBF8F2')
+      .backgroundColor(this.palette.surfaceAlt)
       .borderRadius(24)
-      .shadow({ radius: 26, color: '#33000000', offsetX: 0, offsetY: 8 })
+      .shadow({ radius: 26, color: this.palette.shadow, offsetX: 0, offsetY: 8 })
     }
     .width('100%')
     .height('100%')
@@ -464,7 +481,7 @@ struct GroupBooks {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F7F4EE')
+    .backgroundColor(this.palette.bg)
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 }

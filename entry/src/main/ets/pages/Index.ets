@@ -1,4 +1,6 @@
-import { common } from '@kit.AbilityKit';
+import { common, ConfigurationConstant } from '@kit.AbilityKit';
+import { curves } from '@kit.ArkUI';
+import { ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
 import { picker } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { BookMeta, BookType, GroupParams, ImportResult, ReaderParams } from '../model/BookModels';
@@ -17,10 +19,8 @@ const TAB_BOOKSHELF = 0;
 const TAB_DISCOVER = 1;
 const TAB_PROFILE = 2;
 const TAB_BAR_INSET = 112;
-// 毛玻璃参数：半透明米色底（ARGB 8 位，前两位为不透明度）+ 背景模糊半径
+// 毛玻璃参数：背景模糊半径。半透明底色随浅/深色主题来自 ShelfThemeColors
 // 顶部标题栏整条通栏模糊；底部只有导航胶囊自身模糊
-const BLUR_BAR_BG = '#CCF7F4EE';
-const TAB_BAR_BG = '#CCFFFDF7';
 const BLUR_RADIUS = 20;
 const TAB_BAR_HEIGHT = 56;
 const TAB_BAR_MARGIN = 16;
@@ -54,13 +54,34 @@ struct Index {
   @State bottomInset: number = 0;
   // 顶部浮动栏实测高度：内容区用它做首屏留白，滚动后内容才能滑进模糊区
   @State topBarHeight: number = 0;
+  // 深色模式：EntryAbility 在创建与配置变更时写入，页面只做消费
+  @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
+    ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
+  @State palette: ShelfThemeColors = ShelfTheme.light();
 
   private appContext(): common.UIAbilityContext {
     return this.getUIContext().getHostContext() as common.UIAbilityContext;
   }
 
+  private isSystemDark(): boolean {
+    return this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+  }
+
+  /** 只在配色真正变化时重建对象，避免每次渲染都传新对象导致整页重排 */
+  private applyPalette(): void {
+    const next = ShelfTheme.resolve(this.isSystemDark());
+    if (next.bg !== this.palette.bg) {
+      this.palette = next;
+    }
+  }
+
+  private onSystemColorModeChanged(): void {
+    this.applyPalette();
+  }
+
   aboutToAppear(): void {
     AppBootstrap.init(this.appContext());
+    this.applyPalette();
     this.loadBooks();
   }
 
@@ -348,7 +369,7 @@ struct Index {
   }
 
   private tabColor(index: number): string {
-    return this.currentTab === index ? '#FFF8ED' : '#8A7A64';
+    return this.currentTab === index ? this.palette.accentText : this.palette.tabIdle;
   }
 
   private switchTab(index: number): void {
@@ -356,7 +377,10 @@ struct Index {
       return;
     }
     this.exitSelect();
-    this.currentTab = index;
+    // 弹性过渡：导航切换用 springMotion 给出"落定"手感，不用固定 duration
+    this.getUIContext().animateTo({ curve: curves.springMotion(0.35, 0.85) }, () => {
+      this.currentTab = index;
+    });
     if (index === TAB_BOOKSHELF) {
       this.loadBooks();
     }
@@ -587,15 +611,15 @@ struct Index {
       Text(label)
         .fontSize(14)
         .fontWeight(this.bookFilter === filter ? FontWeight.Medium : FontWeight.Normal)
-        .fontColor(this.bookFilter === filter ? '#FFF8ED' : '#8A7A64')
+        .fontColor(this.bookFilter === filter ? this.palette.accentText : this.palette.tabIdle)
         .maxLines(1)
       Text(`${this.countOf(filter)}`)
         .fontSize(11)
         .fontWeight(FontWeight.Medium)
-        .fontColor(this.bookFilter === filter ? '#8B5E3C' : '#8A7A64')
+        .fontColor(this.bookFilter === filter ? this.palette.accent : this.palette.tabIdle)
         .padding({ left: 6, right: 6, top: 1, bottom: 2 })
         .borderRadius(8)
-        .backgroundColor(this.bookFilter === filter ? '#FFF8ED' : '#EFE7D8')
+        .backgroundColor(this.bookFilter === filter ? this.palette.accentText : this.palette.chipBg)
         .maxLines(1)
     }
     .layoutWeight(1)
@@ -603,10 +627,10 @@ struct Index {
     .justifyContent(FlexAlign.Center)
     .alignItems(VerticalAlign.Center)
     .borderRadius(17)
-    .backgroundColor(this.bookFilter === filter ? '#8B5E3C' : '#00000000')
+    .backgroundColor(this.bookFilter === filter ? this.palette.accent : '#00000000')
     .shadow({
       radius: this.bookFilter === filter ? 8 : 0,
-      color: this.bookFilter === filter ? '#338B5E3C' : '#00000000',
+      color: this.bookFilter === filter ? this.palette.accentSoft : '#00000000',
       offsetX: 0,
       offsetY: this.bookFilter === filter ? 3 : 0
     })
@@ -627,9 +651,9 @@ struct Index {
     .height(42)
     .padding(4)
     .borderRadius(21)
-    .backgroundColor('#F5FFFDF7')
-    .border({ width: 1, color: '#EFE7D8' })
-    .shadow({ radius: 12, color: '#1A8B5E3C', offsetX: 0, offsetY: 4 })
+    .backgroundColor(this.palette.surfaceAlt)
+    .border({ width: 1, color: this.palette.chipBg })
+    .shadow({ radius: 12, color: this.palette.accentShadow, offsetX: 0, offsetY: 4 })
   }
 
   /** 操作项图标：0 多选 / 1 分组至 / 2 删除 */
@@ -641,35 +665,35 @@ struct Index {
           .width(17)
           .height(17)
           .borderRadius(4)
-          .border({ width: 1.5, color: '#3A3A3A' })
+          .border({ width: 1.5, color: this.palette.ink })
         Column()
           .width(7)
           .height(7)
           .borderRadius(2)
-          .backgroundColor('#3A3A3A')
+          .backgroundColor(this.palette.ink)
       } else if (kind === 1) {
         Column()
           .width(17)
           .height(17)
           .borderRadius(4)
-          .border({ width: 1.5, color: '#3A3A3A' })
+          .border({ width: 1.5, color: this.palette.ink })
         Circle()
           .width(7)
           .height(7)
-          .fill('#3A3A3A')
+          .fill(this.palette.ink)
           .translate({ x: 5, y: 5 })
       } else {
         Column()
           .width(13)
           .height(1.6)
           .borderRadius(1)
-          .backgroundColor('#3A3A3A')
+          .backgroundColor(this.palette.ink)
           .translate({ y: -7 })
         Column()
           .width(11)
           .height(12)
           .borderRadius(2.5)
-          .border({ width: 1.6, color: '#3A3A3A' })
+          .border({ width: 1.6, color: this.palette.ink })
           .translate({ y: 1.5 })
       }
     }
@@ -685,7 +709,7 @@ struct Index {
         this.menuIcon(0)
         Text('多选')
           .fontSize(16)
-          .fontColor('#2B2B2B')
+          .fontColor(this.palette.text)
           .margin({ left: 14 })
       }
       .width('100%')
@@ -697,14 +721,14 @@ struct Index {
       })
 
       Divider()
-        .color('#EFEAE0')
+        .color(this.palette.surfaceSink)
         .margin({ left: 54, right: 14 })
 
       Row() {
         this.menuIcon(1)
         Text('分组至')
           .fontSize(16)
-          .fontColor('#2B2B2B')
+          .fontColor(this.palette.text)
           .margin({ left: 14 })
       }
       .width('100%')
@@ -716,14 +740,14 @@ struct Index {
       })
 
       Divider()
-        .color('#EFEAE0')
+        .color(this.palette.surfaceSink)
         .margin({ left: 54, right: 14 })
 
       Row() {
         this.menuIcon(2)
         Text('删除')
           .fontSize(16)
-          .fontColor('#2B2B2B')
+          .fontColor(this.palette.text)
           .margin({ left: 14 })
       }
       .width('100%')
@@ -736,7 +760,7 @@ struct Index {
     }
     .width(240)
     .padding({ top: 4, bottom: 4 })
-    .backgroundColor('#FDFBF7')
+    .backgroundColor(this.palette.surface)
   }
 
   /** 分组卡里的 2×2 封面缩略格：有书时画迷你封面（书脊 + 书名），不足 4 本的空位留白 */
@@ -810,12 +834,12 @@ struct Index {
       .aspectRatio(1)
       .padding(7)
       .borderRadius(9)
-      .backgroundColor('#FFFFFF')
-      .border({ width: 1, color: '#E6E0D4' })
+      .backgroundColor(this.palette.surface)
+      .border({ width: 1, color: this.palette.border })
 
       Text(name)
         .fontSize(15)
-        .fontColor('#2B2B2B')
+        .fontColor(this.palette.text)
         .width('100%')
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -823,7 +847,7 @@ struct Index {
 
       Text(`共 ${this.groupCount(name)} 本`)
         .fontSize(12)
-        .fontColor('#9A9389')
+        .fontColor(this.palette.subtleText)
         .width('100%')
         .margin({ top: 2 })
     }
@@ -856,13 +880,13 @@ struct Index {
       .aspectRatio(0.72)
       .padding(8)
       .borderRadius(10)
-      .backgroundColor('#FFFFFF')
-      .border({ width: 1, color: '#E6E0D4' })
+      .backgroundColor(this.palette.surface)
+      .border({ width: 1, color: this.palette.border })
 
       Text(name)
         .fontSize(14)
         .fontWeight(FontWeight.Medium)
-        .fontColor('#2B2B2B')
+        .fontColor(this.palette.text)
         .width('100%')
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -870,7 +894,7 @@ struct Index {
 
       Text(`共 ${this.groupCount(name)} 本`)
         .fontSize(11)
-        .fontColor('#8C8C8C')
+        .fontColor(this.palette.subText)
         .width('100%')
         .margin({ top: 2 })
     }
@@ -890,22 +914,22 @@ struct Index {
           .width(26)
           .height(1.6)
           .borderRadius(1)
-          .backgroundColor('#6B6558')
+          .backgroundColor(this.palette.ink)
         Column()
           .width(1.6)
           .height(26)
           .borderRadius(1)
-          .backgroundColor('#6B6558')
+          .backgroundColor(this.palette.ink)
       }
       .width('100%')
       .aspectRatio(1)
       .borderRadius(9)
-      .backgroundColor('#FBF8F2')
-      .border({ width: 1, color: '#E6E0D4' })
+      .backgroundColor(this.palette.surfaceAlt)
+      .border({ width: 1, color: this.palette.border })
 
       Text('新建分组')
         .fontSize(15)
-        .fontColor('#2B2B2B')
+        .fontColor(this.palette.text)
         .width('100%')
         .margin({ top: 8 })
 
@@ -927,7 +951,7 @@ struct Index {
       Column()
         .width('100%')
         .height('100%')
-        .backgroundColor('#B3F2EEE6')
+        .backgroundColor(this.palette.surfaceSink)
         .onClick(() => {
           this.closeGroupSheet();
         })
@@ -937,12 +961,12 @@ struct Index {
           Text('分组至')
             .fontSize(24)
             .fontWeight(FontWeight.Bold)
-            .fontColor('#2B2B2B')
+            .fontColor(this.palette.text)
           Blank()
           if (this.selectedHasGroup()) {
             Text('移出分组')
               .fontSize(14)
-              .fontColor('#8A7A64')
+              .fontColor(this.palette.tabIdle)
               .padding({ left: 6, right: 14, top: 6, bottom: 6 })
               .onClick(() => {
                 this.applyGroup('');
@@ -953,19 +977,19 @@ struct Index {
               .width(16)
               .height(1.8)
               .borderRadius(1)
-              .backgroundColor('#6B6558')
+              .backgroundColor(this.palette.ink)
               .rotate({ angle: 45 })
             Column()
               .width(16)
               .height(1.8)
               .borderRadius(1)
-              .backgroundColor('#6B6558')
+              .backgroundColor(this.palette.ink)
               .rotate({ angle: -45 })
           }
           .width(34)
           .height(34)
           .borderRadius(17)
-          .backgroundColor('#EFEAE0')
+          .backgroundColor(this.palette.surfaceSink)
           .onClick(() => {
             this.closeGroupSheet();
           })
@@ -994,7 +1018,7 @@ struct Index {
       .width('100%')
       .height('calc(100% - 46vp)')
       .padding({ left: 18, right: 18, top: this.topInset + 24, bottom: this.bottomInset + 20 })
-      .backgroundColor('#F8F4ED')
+      .backgroundColor(this.palette.surfaceAlt)
       .borderRadius({ topLeft: 26, topRight: 26 })
       .margin({ top: 46 })
     }
@@ -1009,7 +1033,7 @@ struct Index {
       Column()
         .width('100%')
         .height('100%')
-        .backgroundColor('#4D000000')
+        .backgroundColor(this.palette.scrim)
         .onClick(() => {
           this.cancelNewGroup();
         })
@@ -1018,7 +1042,7 @@ struct Index {
         Text('新建分组')
           .fontSize(17)
           .fontWeight(FontWeight.Medium)
-          .fontColor('#2B2B2B')
+          .fontColor(this.palette.text)
           .width('100%')
           .textAlign(TextAlign.Center)
 
@@ -1026,8 +1050,8 @@ struct Index {
           TextInput({ placeholder: '新建分组', text: this.newGroupName })
             .maxLength(36)
             .fontSize(15)
-            .fontColor('#2B2B2B')
-            .placeholderColor('#A8A29A')
+            .fontColor(this.palette.text)
+            .placeholderColor(this.palette.subtleText)
             .placeholderFont({ size: 15 })
             .backgroundColor('#00000000')
             .padding({ left: 0, right: 0 })
@@ -1039,14 +1063,14 @@ struct Index {
             Blank()
             Text(`${this.newGroupName.length}/36`)
               .fontSize(11)
-              .fontColor('#A8A29A')
+              .fontColor(this.palette.subtleText)
           }
           .width('100%')
 
           Column()
             .width('100%')
             .height(1)
-            .backgroundColor('#DCD5C8')
+            .backgroundColor(this.palette.border)
         }
         .width('100%')
         .margin({ top: 18 })
@@ -1054,7 +1078,7 @@ struct Index {
         Row() {
           Text('取消')
             .fontSize(16)
-            .fontColor('#C4553C')
+            .fontColor(this.palette.danger)
             .layoutWeight(1)
             .textAlign(TextAlign.Center)
             .padding({ top: 15, bottom: 15 })
@@ -1064,10 +1088,10 @@ struct Index {
           Column()
             .width(1)
             .height(22)
-            .backgroundColor('#E6E0D4')
+            .backgroundColor(this.palette.border)
           Text('确定')
             .fontSize(16)
-            .fontColor(this.newGroupName.trim().length > 0 ? '#2F7D5A' : '#B9C4BC')
+            .fontColor(this.newGroupName.trim().length > 0 ? this.palette.success : this.palette.disabled)
             .layoutWeight(1)
             .textAlign(TextAlign.Center)
             .padding({ top: 15, bottom: 15 })
@@ -1081,9 +1105,9 @@ struct Index {
       .width('86%')
       .constraintSize({ maxWidth: 400 })
       .padding({ left: 22, right: 22, top: 22, bottom: 4 })
-      .backgroundColor('#FBF8F2')
+      .backgroundColor(this.palette.surfaceAlt)
       .borderRadius(24)
-      .shadow({ radius: 26, color: '#33000000', offsetX: 0, offsetY: 8 })
+      .shadow({ radius: 26, color: this.palette.shadow, offsetX: 0, offsetY: 8 })
     }
     .width('100%')
     .height('100%')
@@ -1097,7 +1121,7 @@ struct Index {
         .width(20)
         .height(20)
         .fillOpacity(0)
-        .stroke('#5C4A32')
+        .stroke(this.palette.chipText)
         .strokeWidth(1.5)
 
       // 箭头竖杆
@@ -1105,7 +1129,7 @@ struct Index {
         .width(1.6)
         .height(9)
         .borderRadius(1)
-        .backgroundColor('#5C4A32')
+        .backgroundColor(this.palette.chipText)
         .translate({ x: 0, y: -1 })
 
       // 箭头头部左斜杆
@@ -1113,7 +1137,7 @@ struct Index {
         .width(1.6)
         .height(6)
         .borderRadius(1)
-        .backgroundColor('#5C4A32')
+        .backgroundColor(this.palette.chipText)
         .rotate({ angle: 45 })
         .translate({ x: -1.7, y: 1.7 })
 
@@ -1122,16 +1146,16 @@ struct Index {
         .width(1.6)
         .height(6)
         .borderRadius(1)
-        .backgroundColor('#5C4A32')
+        .backgroundColor(this.palette.chipText)
         .rotate({ angle: -45 })
         .translate({ x: 1.7, y: 1.7 })
     }
     .width(38)
     .height(38)
     .borderRadius(19)
-    .backgroundColor('#EFE7D8')
-    .border({ width: 1, color: '#E4D8C4' })
-    .shadow({ radius: 8, color: '#1A8B5E3C', offsetX: 0, offsetY: 2 })
+    .backgroundColor(this.palette.chipBg)
+    .border({ width: 1, color: this.palette.border })
+    .shadow({ radius: 8, color: this.palette.accentShadow, offsetX: 0, offsetY: 2 })
     .margin({ right: 8 })
     .onClick(() => {
       this.toast(`已下载 ${this.books.length} 本，全部保存在本机书架`);
@@ -1144,13 +1168,13 @@ struct Index {
     Column() {
       Column({ space: 5 }) {
         Row({ space: 5 }) {
-          Circle().width(5).height(5).fill('#5C4A32')
-          Circle().width(5).height(5).fill('#5C4A32')
+          Circle().width(5).height(5).fill(this.palette.chipText)
+          Circle().width(5).height(5).fill(this.palette.chipText)
         }
 
         Row({ space: 5 }) {
-          Circle().width(5).height(5).fill('#5C4A32')
-          Circle().width(5).height(5).fill('#5C4A32')
+          Circle().width(5).height(5).fill(this.palette.chipText)
+          Circle().width(5).height(5).fill(this.palette.chipText)
         }
       }
     }
@@ -1159,9 +1183,9 @@ struct Index {
     .justifyContent(FlexAlign.Center)
     .alignItems(HorizontalAlign.Center)
     .borderRadius(19)
-    .backgroundColor('#EFE7D8')
-    .border({ width: 1, color: '#E4D8C4' })
-    .shadow({ radius: 8, color: '#1A8B5E3C', offsetX: 0, offsetY: 2 })
+    .backgroundColor(this.palette.chipBg)
+    .border({ width: 1, color: this.palette.border })
+    .shadow({ radius: 8, color: this.palette.accentShadow, offsetX: 0, offsetY: 2 })
     .bindMenu(this.importMenu)
   }
 
@@ -1185,17 +1209,17 @@ struct Index {
       Text(this.emptyTitle())
         .fontSize(22)
         .fontWeight(FontWeight.Bold)
-        .fontColor('#2B2B2B')
+        .fontColor(this.palette.text)
       Text(this.emptyHint())
         .fontSize(14)
-        .fontColor('#8C8C8C')
+        .fontColor(this.palette.subText)
         .margin({ top: 10 })
       Row() {
         if (this.bookFilter !== FILTER_IMAGE) {
           Button('导入 TXT')
             .type(ButtonType.Capsule)
-            .backgroundColor('#8B5E3C')
-            .fontColor('#FFF8ED')
+            .backgroundColor(this.palette.accent)
+            .fontColor(this.palette.accentText)
             .fontSize(15)
             .onClick(() => {
               this.importTxt();
@@ -1204,8 +1228,8 @@ struct Index {
         if (this.bookFilter !== FILTER_TEXT) {
           Button('导入图片包')
             .type(ButtonType.Capsule)
-            .backgroundColor('#EFE7D8')
-            .fontColor('#5C4A32')
+            .backgroundColor(this.palette.chipBg)
+            .fontColor(this.palette.chipText)
             .fontSize(15)
             .margin({ left: this.bookFilter === FILTER_IMAGE ? 0 : 14 })
             .onClick(() => {
@@ -1217,7 +1241,7 @@ struct Index {
 
       Text('TXT 支持 UTF-8 / GBK，可一次多选；图片包为 ZIP，单次一个，子目录即章节')
         .fontSize(12)
-        .fontColor('#A8A8A8')
+        .fontColor(this.palette.subtleText)
         .margin({ top: 22 })
     }
     .width('100%')
@@ -1227,63 +1251,28 @@ struct Index {
     .padding({ left: 28, right: 28, top: this.topGapHeight(), bottom: this.tabBarInset() - 30 })
   }
 
+  /** 三个 tab 的系统符号：集中在一处，便于替换名称 */
+  private tabSymbol(index: number): Resource {
+    if (index === TAB_BOOKSHELF) {
+      return $r('sys.symbol.book');
+    }
+    if (index === TAB_DISCOVER) {
+      return $r('sys.symbol.compass');
+    }
+    return $r('sys.symbol.person');
+  }
+
+  /** 原手绘几何图标（约 10 个形状图层）改为单图层矢量符号，选中项播放一次弹跳 */
   @Builder
   tabIcon(index: number) {
-    Column() {
-      if (index === TAB_BOOKSHELF) {
-        Row({ space: 2 }) {
-          Column()
-            .width(3.5)
-            .height(13)
-            .borderRadius(2)
-            .backgroundColor(this.tabColor(index))
-          Column()
-            .width(3.5)
-            .height(18)
-            .borderRadius(2)
-            .backgroundColor(this.tabColor(index))
-          Column()
-            .width(3.5)
-            .height(15)
-            .borderRadius(2)
-            .backgroundColor(this.tabColor(index))
-        }
-        .height(18)
-        .alignItems(VerticalAlign.Bottom)
-      } else if (index === TAB_DISCOVER) {
-        Stack() {
-          Circle()
-            .width(17)
-            .height(17)
-            .fillOpacity(0)
-            .stroke(this.tabColor(index))
-            .strokeWidth(1.5)
-          Circle()
-            .width(5)
-            .height(5)
-            .fill(this.tabColor(index))
-        }
-        .width(18)
-        .height(18)
-      } else {
-        Column() {
-          Circle()
-            .width(7)
-            .height(7)
-            .fill(this.tabColor(index))
-          Column()
-            .width(15)
-            .height(8)
-            .borderRadius({ topLeft: 8, topRight: 8, bottomLeft: 3, bottomRight: 3 })
-            .backgroundColor(this.tabColor(index))
-            .margin({ top: 2 })
-        }
-      }
-    }
-    .width(20)
-    .height(20)
-    .justifyContent(FlexAlign.Center)
-    .alignItems(HorizontalAlign.Center)
+    SymbolGlyph(this.tabSymbol(index))
+      .fontSize(this.currentTab === index ? 20 : 18)
+      .fontColor([this.tabColor(index)])
+      .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      .symbolEffect(new BounceSymbolEffect(EffectScope.WHOLE, EffectDirection.UP),
+        this.currentTab === index)
+      .width(22)
+      .height(22)
   }
 
   @Builder
@@ -1299,7 +1288,7 @@ struct Index {
     .height(48)
     .justifyContent(FlexAlign.Center)
     .borderRadius(24)
-    .backgroundColor(this.currentTab === index ? '#8B5E3C' : '#00000000')
+    .backgroundColor(this.currentTab === index ? this.palette.accent : '#00000000')
     .onClick(() => {
       this.switchTab(index);
     })
@@ -1318,12 +1307,13 @@ struct Index {
     .padding(4)
     .borderRadius(28)
     // 半透明底色 + 背景模糊：只有这根导航胶囊是毛玻璃，其余内容不遮
-    .backgroundColor(TAB_BAR_BG)
+    .backgroundColor(this.palette.tabBarBg)
     .backdropBlur(BLUR_RADIUS)
-    .border({ width: 1, color: '#EFE7D8' })
-    .shadow({ radius: 22, color: '#268B5E3C', offsetX: 0, offsetY: 8 })
+    .border({ width: 1, color: this.palette.chipBg })
+    .shadow({ radius: 22, color: this.palette.accentShadow, offsetX: 0, offsetY: 8 })
     .margin({ bottom: this.bottomInset + TAB_BAR_MARGIN })
-    .blur(this.managing ? 8 : 0)
+    // 原为 blur(8)：对已做 backdropBlur 的层再模糊是双重离屏渲染，改用透明度淡出
+    .opacity(this.managing ? 0.4 : 1)
   }
 
   /**
@@ -1358,11 +1348,11 @@ struct Index {
             Text(this.tabTitle())
               .fontSize(28)
               .fontWeight(FontWeight.Bold)
-              .fontColor('#2B2B2B')
+              .fontColor(this.palette.text)
             if (this.tabSubtitle().length > 0) {
               Text(this.tabSubtitle())
                 .fontSize(12)
-                .fontColor('#9C8C72')
+                .fontColor(this.palette.subtleText)
                 .margin({ top: 2 })
             }
           }
@@ -1391,7 +1381,7 @@ struct Index {
       }
     }
     .width('100%')
-    .backgroundColor(BLUR_BAR_BG)
+    .backgroundColor(this.palette.barBg)
     .backdropBlur(BLUR_RADIUS)
     // Stack 的 alignContent 是 Bottom，这里必须显式贴到顶边，否则标题栏会掉到底部
     .position({ x: 0, y: 0 })
@@ -1468,14 +1458,14 @@ struct Index {
                   .zIndex(this.managing && this.manageTargetId === item.id ? 2 : 0)
                   .outline({
                     width: this.managing && this.manageTargetId === item.id ? 2 : 0,
-                    color: '#8B5E3C',
+                    color: this.palette.accent,
                     radius: 16
                   })
                   .bindPopup(this.managing && this.manageTargetId === item.id
                     && !this.groupSheetVisible && !this.newGroupVisible, {
                     builder: this.bookActionMenu,
                     placement: Placement.Bottom,
-                    popupColor: '#FDFBF7',
+                    popupColor: this.palette.surface,
                     enableArrow: false,
                     // 点外部即收起弹窗，再由 onStateChange 同步退出管理态。
                     // 注意：autoCancel 为 false 时弹窗的遮障层会吞掉外部点击，页面里的 onClick 收不到。
@@ -1530,6 +1520,7 @@ struct Index {
           LoadingProgress()
             .width(48)
             .height(48)
+            // 导入遮罩是黑底，此处固定浅色，不跟随深色主题变暗
             .color('#FFF8ED')
           Text(this.importStage.length > 0 ? this.importStage : '正在导入')
             .fontSize(14)
@@ -1538,14 +1529,14 @@ struct Index {
         }
         .width('100%')
         .height('100%')
-        .backgroundColor('#99000000')
+        .backgroundColor(this.palette.overlay)
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
       }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F7F4EE')
+    .backgroundColor(this.palette.bg)
     .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
   }
 }
