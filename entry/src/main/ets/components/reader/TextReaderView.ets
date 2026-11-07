@@ -34,6 +34,11 @@ const PAGE_PREFETCH_PREV_DELAY = 560;
 const TAP_SIDE_RATIO = 0.3;
 // 正文点击去抖：双击选词会连发两次 click，200ms 内的第二次忽略
 const TEXT_TAP_GUARD = 200;
+// 选区锁时长（按下起算）：Text 开了 copyOption 后系统自带"双击选词"，
+// 快速连点翻页正好构成双击。每次触摸按下都锁 400ms 并续锁：
+// 双击第二下永远落在锁定期内不触发选择；长按需按住 500ms+，
+// 按下 400ms 后锁已解除，长按选词不受影响
+const SELECTION_LOCK_AFTER_DOWN = 400;
 // 上下模式点击翻屏只滚可视高度的 90%，保留少量重叠便于衔接上下文
 const TAP_SCROLL_RATIO = 0.9;
 const TAP_SCROLL_DURATION = 240;
@@ -577,6 +582,9 @@ export struct TextReaderView {
   private lastReportTime: number = 0;
   // 正文点击去抖时间戳（双击选词连发的第二次 click）
   private lastTextTapAt: number = 0;
+  // 触摸按下后的选区锁：锁定期内禁用文本选择（防双击选词），松手自解
+  @State selectionLocked: boolean = false;
+  private selectionUnlockTimer: number = -1;
   private restoreTimer: number = -1;
   private readyTimer: number = -1;
   // 竖排定位：数据源变化后，在 List 完成布局（onScrollIndex 首次回调）时滚动到目标块
@@ -620,6 +628,10 @@ export struct TextReaderView {
     this.pageSeq++;
     this.layoutEpoch++;
     this.clearPendingTimers();
+    if (this.selectionUnlockTimer !== -1) {
+      clearTimeout(this.selectionUnlockTimer);
+      this.selectionUnlockTimer = -1;
+    }
     if (this.readyTimer !== -1) {
       clearTimeout(this.readyTimer);
       this.readyTimer = -1;
@@ -1638,8 +1650,11 @@ export struct TextReaderView {
       .fontColor(this.textColor)
       .fontFamily(this.fontFamily)
       .textAlign(this.textAlignValue())
-      .copyOption(CopyOptions.LocalDevice)
+      .copyOption(this.selectionLocked ? CopyOptions.None : CopyOptions.LocalDevice)
       .editMenuOptions(this.selectionMenu(chapter, baseStart, content))
+      .onTouch((event: TouchEvent) => {
+        this.onBodyTouch(event);
+      })
       .onClick((event: ClickEvent) => {
         this.handleTextTap(event);
       })
@@ -1651,8 +1666,11 @@ export struct TextReaderView {
         .fontColor(this.textColor)
         .fontFamily(this.fontFamily)
         .textAlign(this.textAlignValue())
-        .copyOption(CopyOptions.LocalDevice)
+        .copyOption(this.selectionLocked ? CopyOptions.None : CopyOptions.LocalDevice)
         .editMenuOptions(this.selectionMenu(chapter, baseStart, content))
+        .onTouch((event: TouchEvent) => {
+          this.onBodyTouch(event);
+        })
         .onClick((event: ClickEvent) => {
           this.handleTextTap(event);
         })
@@ -1682,6 +1700,26 @@ export struct TextReaderView {
     }
     this.lastTextTapAt = now;
     this.applyTap(event.windowX, event.windowY);
+  }
+
+  /**
+   * 正文触摸：按下即锁定选区，400ms 后自动解除（快速连点时每次按下续锁）。
+   * 挂在 onTouch 而不是 click 上：click 有 200ms 去抖会被吞掉导致续不上锁，
+   * 而双击选词的第二下永远不会落在锁定期外 —— 双击触发不了选择；
+   * 长按需要按住 500ms 以上，系统判定长按时锁已解除，长按选词不受影响。
+   */
+  private onBodyTouch(event: TouchEvent): void {
+    if (event.type !== TouchType.Down) {
+      return;
+    }
+    this.selectionLocked = true;
+    if (this.selectionUnlockTimer !== -1) {
+      clearTimeout(this.selectionUnlockTimer);
+    }
+    this.selectionUnlockTimer = setTimeout(() => {
+      this.selectionUnlockTimer = -1;
+      this.selectionLocked = false;
+    }, SELECTION_LOCK_AFTER_DOWN);
   }
 
   private applyTap(x: number, y: number): void {
