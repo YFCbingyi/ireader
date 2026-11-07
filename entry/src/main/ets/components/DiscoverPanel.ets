@@ -1,10 +1,11 @@
 import { ConfigurationConstant } from '@kit.AbilityKit';
-import { ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
+import { AppSkin, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
 
 @Component
 export struct DiscoverPanel {
   @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
     ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
+  @StorageProp('appSkin') @Watch('onAppSkinChanged') appSkin: string = AppSkin.GOLD;
   @State palette: ShelfThemeColors = ShelfTheme.light();
 
   aboutToAppear(): void {
@@ -12,13 +13,18 @@ export struct DiscoverPanel {
   }
 
   private applyPalette(): void {
-    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
-    if (next.bg !== this.palette.bg) {
+    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
+      this.appSkin);
+    if (next.key !== this.palette.key) {
       this.palette = next;
     }
   }
 
   private onSystemColorModeChanged(): void {
+    this.applyPalette();
+  }
+
+  private onAppSkinChanged(): void {
     this.applyPalette();
   }
 

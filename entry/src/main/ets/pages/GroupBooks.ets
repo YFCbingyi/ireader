@@ -1,6 +1,6 @@
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { BookMeta, GroupParams, ReaderParams } from '../model/BookModels';
-import { ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
+import { AppSkin, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
 import { SelectionUtil } from '../utils/SelectionUtil';
 import { WindowUtil } from '../utils/WindowUtil';
 import { AppBootstrap } from '../service/AppBootstrap';
@@ -26,16 +26,22 @@ struct GroupBooks {
   // 深色模式：与书架首页共用同一套色板，避免深色下进分组页底色仍是浅米色
   @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
     ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
+  @StorageProp('appSkin') @Watch('onAppSkinChanged') appSkin: string = AppSkin.GOLD;
   @State palette: ShelfThemeColors = ShelfTheme.light();
 
   private applyPalette(): void {
-    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
-    if (next.bg !== this.palette.bg) {
+    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
+      this.appSkin);
+    if (next.key !== this.palette.key) {
       this.palette = next;
     }
   }
 
   private onSystemColorModeChanged(): void {
+    this.applyPalette();
+  }
+
+  private onAppSkinChanged(): void {
     this.applyPalette();
   }
 

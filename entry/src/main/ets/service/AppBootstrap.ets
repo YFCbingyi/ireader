@@ -1,5 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { AppPaths } from '../utils/AppPaths';
+import { AppAppearanceStore } from './AppAppearanceStore';
 import { LibraryStore } from './LibraryStore';
 
 /**
@@ -11,5 +12,6 @@ export class AppBootstrap {
   static init(context: common.UIAbilityContext): void {
     AppPaths.init(context.filesDir);
     LibraryStore.init();
+    AppAppearanceStore.init();
   }
 }

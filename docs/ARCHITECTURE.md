@@ -43,7 +43,8 @@ entry/src/main/ets/
 │   │                         #   ReadingProgress / BookMeta / ChapterMeta / ImageEntry / BookManifest /
 │   │                         #   Bookmark / ReaderSettings / SearchHit / ImportResult / ImportProgressCallback）
 │   ├── Annotation.ets        # 划线/想法模型（Annotation）+ 渲染片段切分（SegmentBuilder）
-│   ├── ReaderTheme.ets       # ReadingTheme 枚举 + ReaderThemeColors 三套配色
+│   ├── ReaderTheme.ets       # 阅读页主题：ReadingTheme 枚举 + ReaderThemeColors 三套配色
+│   ├── ShelfTheme.ets        # App 外壳皮肤：AppSkin 枚举 + ShelfThemeColors 亮/暗色板（含书卡封面配色）
 │   └── ReadingStats.ets      # 阅读时长统计模型
 ├── service/
 │   ├── ImportService.ets     # importTxt（走 taskpool）/ importZip（解压 + 扫描）
@@ -55,7 +56,8 @@ entry/src/main/ets/
 │   ├── LibraryStore.ets      # 书架/清单/设置/书签的 JSON 读写
 │   ├── ReadingStatsStore.ets # 阅读时长累计（日期键 / clear）
 │   ├── ProfileStats.ets      # 「我的」页派生统计：连续天数 / 13 周热力图 / 书架概览 / 笔记聚合
-│   ├── BackupService.ets     # 阅读数据导出：书架 / 设置 / 统计 / 逐书书签与划线
+│   ├── BackupService.ets     # 阅读数据导出：书架 / 设置 / 统计 / 逐书书签与划线 / App 皮肤
+│   ├── AppAppearanceStore.ets # App 皮肤独立持久化 + AppStorage 广播
 │   └── (无 EdgeTurnTracker —— 已删除)
 ├── components/
 │   ├── BookCard.ets          # 书架卡片
@@ -136,7 +138,8 @@ class Bookmark {
 ```
 filesDir/
 ├── library.json                 # BookMeta[]（书架，按 updatedAt 倒序）
-├── settings.json                # ReaderSettings（全局字号/行距/主题/两类书的阅读方向）
+├── settings.json                # ReaderSettings（全局字号/行距/阅读主题/两类书的阅读方向）
+├── app_appearance.json          # App 皮肤 AppSkin（独立于阅读器设置）
 ├── reading_stats.json           # 阅读时长
 ├── bookmarks/{bookId}.json      # Bookmark[]
 ├── search/{bookId}.json         # string[]（全文搜索历史，最新在前，最多 10 条）
@@ -328,7 +331,8 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 - 书签记录 `chapterIndex + charOffset + pageIndex + scrollRatio + preview`；`updateBookmarkState()` 按"同章 + 同偏移/同页"判断当前是否已加书签。
 - 阅读时长另由 `ReadingStatsStore` 按 30s 心跳累计，与进度链路解耦。
 - 「我的」页（`ProfilePanel`）不新增持久化：连续天数 / 最长连续 / 本周合计 / 日均 / 单日最长由 `reading_stats.json` 派生（`ProfileStats.habit`），13 周热力图同源；书架概览由 `library.json` 及 `annotations/`、`bookmarks/` 目录派生。需逐书读盘的笔记聚合与沙箱占用统计放在 `setTimeout` 里首帧后算（`scheduleSlowData`）。`Index.onPageShow` 递增 `profileRefresh` 传给 `ProfilePanel`，保证从阅读页返回后统计即时刷新；`ReadingStatsStore.clear()` 只清空计时数据，不动书籍 / 进度 / 书签 / 划线。
-- 最近笔记点击时给 `ReaderParams` 带上 `jumpChapter / jumpOffset`，`Reader.aboutToAppear` 用它们覆盖上次进度后调 `openChapter`，实现跳回划线位置；旧调用不传这两个字段（默认 -1）行为不变。设置区「导出备份」用 `picker.DocumentViewPicker.save()` 拿用户选定的 uri，再由 `FileUtil.writeUriText` 写入 `BackupService.buildJson()`；备份只含书架元数据 / 设置 / 统计 / 书签 / 划线，**不含书籍正文与图片**，按 `bookId` 分组便于日后恢复。
+- 最近笔记点击时给 `ReaderParams` 带上 `jumpChapter / jumpOffset`，`Reader.aboutToAppear` 用它们覆盖上次进度后调 `openChapter`，实现跳回划线位置；旧调用不传这两个字段（默认 -1）行为不变。设置区「导出备份」用 `picker.DocumentViewPicker.save()` 拿用户选定的 uri，再由 `FileUtil.writeUriText` 写入 `BackupService.buildJson()`；备份只含书架元数据 / 设置 / 统计 / 书签 / 划线 / App 皮肤，**不含书籍正文与图片**，按 `bookId` 分组便于日后恢复。
+- **两套主题互不相关**：`ReadingTheme`（护眼 / 白色 / 深色 / 随系统）只作用于阅读页正文与阅读页面板，存 `settings.json` 的 `ReaderSettings.theme`，入口是阅读页底栏「背景」；`AppSkin`（金棕 / 喜庆红 / 深黑 / 天蓝）只作用于书架 / 发现 / 我的 / 分组 / 书卡，存 `app_appearance.json`，入口是「我的」页「外观」。亮/暗始终由 `systemColorMode` 决定，每个皮肤各有亮暗变体，App 皮肤**没有「随系统」取值**。`ShelfTheme.resolve(systemDark, skin)` 产出带 `key` 的色板，6 个消费组件用 `@StorageProp('appSkin') @Watch(...)` 并比较 `key` 判断重绘（换皮肤时 `bg` 可能不变）；AppStorage 值由 `AppBootstrap.init → AppAppearanceStore.init` 注入，选完皮肤即时换色，阅读页不受影响。书卡封面渐变（TXT / 图片书）、封面书名文字、内框与分隔线，以及分组卡里的 2×2 封面预览，统一取自 `ShelfThemeColors` 的 `cover*` 字段（`ShelfTheme.applyCover`），和「我的 - 外观」同一套皮肤；金棕皮肤保留原封面配色，深色模式下其余皮肤略压暗。导入遮罩上的文字是黑底固定浅色，不随皮肤变。
 
 ## 11. 关键不变量（改代码前必读）
 
