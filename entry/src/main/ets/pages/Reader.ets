@@ -52,6 +52,21 @@ const BOOKMARK_RIBBON_TIP = 14;
 const BOOKMARK_RIBBON_MIN_H = 56;
 const BOOKMARK_RIBBON_STRETCH = 120;
 
+// 内置正文字体：OFL 开源字体按 GB2312 + 常用标点子集化后放在 rawfile/fonts。
+// 系统字体白名单通常只开放「书宋-简」，所以这些字体由应用自己注册。
+const FONT_SANS: string = '思源黑体';
+const FONT_SERIF: string = '思源宋体';
+const FONT_KAI: string = '霞鹜文楷';
+const FONT_HAPPY: string = '站酷快乐体';
+const FONT_XIAOWEI: string = '站酷小薇体';
+const FONT_MASHAN: string = '马善政楷体';
+
+/** 注册结果：进程内只注册一次，只有注册成功的字体才进字体菜单 */
+class BuiltinFontState {
+  static registered: boolean = false;
+  static names: string[] = [];
+}
+
 @Entry
 @Component
 struct Reader {
@@ -189,6 +204,7 @@ struct Reader {
       : this.settings.imagePageTurn;
     this.readingMode = this.pageTurn === PageTurnMode.VERTICAL
       ? ReadingMode.VERTICAL : ReadingMode.HORIZONTAL;
+    this.registerBuiltinFonts();
     this.loadFontList();
     this.manifest = LibraryStore.getManifest(this.bookId);
     this.chapterList = this.manifest.chapters;
@@ -1308,13 +1324,61 @@ struct Reader {
     this.openChapter(hit.chapterIndex, hit.charOffset, 0, 0, true);
   }
 
-  private loadFontList(): void {
+  /** 单个字体注册失败不影响其它字体；返回是否注册成功 */
+  private registerOneFont(name: string, src: Resource): boolean {
     try {
-      const list: string[] = this.getUIContext().getFont().getSystemFontList();
-      this.fontList = list;
+      this.getUIContext().getFont().registerFont({ familyName: name, familySrc: src });
+      return true;
     } catch (e) {
-      this.fontList = [];
+      return false;
     }
+  }
+
+  private registerBuiltinFonts(): void {
+    if (BuiltinFontState.registered) {
+      return;
+    }
+    BuiltinFontState.registered = true;
+    const names: string[] = [];
+    if (this.registerOneFont(FONT_SANS, $rawfile('fonts/noto-sans-sc.otf'))) {
+      names.push(FONT_SANS);
+    }
+    if (this.registerOneFont(FONT_SERIF, $rawfile('fonts/noto-serif-sc.otf'))) {
+      names.push(FONT_SERIF);
+    }
+    if (this.registerOneFont(FONT_KAI, $rawfile('fonts/lxgw-wenkai.ttf'))) {
+      names.push(FONT_KAI);
+    }
+    if (this.registerOneFont(FONT_HAPPY, $rawfile('fonts/zcool-kuaile.ttf'))) {
+      names.push(FONT_HAPPY);
+    }
+    if (this.registerOneFont(FONT_XIAOWEI, $rawfile('fonts/zcool-xiaowei.ttf'))) {
+      names.push(FONT_XIAOWEI);
+    }
+    if (this.registerOneFont(FONT_MASHAN, $rawfile('fonts/ma-shan-zheng.ttf'))) {
+      names.push(FONT_MASHAN);
+    }
+    BuiltinFontState.names = names;
+  }
+
+  /** 字体菜单 = 注册成功的内置字体 + 系统可用字体（去重，系统字体排在后面） */
+  private loadFontList(): void {
+    const names: string[] = [];
+    for (let i = 0; i < BuiltinFontState.names.length; i++) {
+      names.push(BuiltinFontState.names[i]);
+    }
+    try {
+      const system: string[] = this.getUIContext().getFont().getSystemFontList();
+      for (let i = 0; i < system.length; i++) {
+        const name: string = system[i];
+        if (name.length > 0 && names.indexOf(name) < 0) {
+          names.push(name);
+        }
+      }
+    } catch (e) {
+      console.error('getSystemFontList failed, use built-in fonts only');
+    }
+    this.fontList = names;
   }
 
   private changeFontSize(size: number): void {
