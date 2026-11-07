@@ -1,5 +1,5 @@
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
-import { window } from '@kit.ArkUI';
+import { curves, window } from '@kit.ArkUI';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import {
@@ -1242,12 +1242,31 @@ struct Reader {
     .height('100%')
   }
 
+  /** 底部 tab 的系统符号：集中一处，便于按 IDE 补全替换 */
+  private tabSymbol(name: string): Resource {
+    if (name === 'catalog') {
+      return $r('sys.symbol.list_bullet');
+    }
+    if (name === 'font') {
+      return $r('sys.symbol.textformat');
+    }
+    if (name === 'actions') {
+      return $r('sys.symbol.gearshape');
+    }
+    if (name === 'background') {
+      return $r('sys.symbol.paintpalette');
+    }
+    return $r('sys.symbol.book_pages');
+  }
+
   @Builder
-  bottomTab(icon: string, label: string, name: string) {
+  bottomTab(label: string, name: string) {
     Column() {
-      Text(icon)
+      SymbolGlyph(this.tabSymbol(name))
         .fontSize(18)
-        .fontColor(this.panel === name ? this.palette.accent : this.barTextColor())
+        .fontColor([this.panel === name ? this.palette.accent : this.barTextColor()])
+        // 面板切换语义：选中项播放一次弹跳
+        .symbolEffect(new BounceSymbolEffect(EffectScope.WHOLE), this.panel === name)
       Text(label)
         .fontSize(10)
         .margin({ top: 3 })
@@ -1277,13 +1296,17 @@ struct Reader {
   /** 控制栏显隐：仅在打开时刷新进度与书签文案，减少滚动期间的无效重建 */
   private toggleControls(): void {
     if (this.controlsVisible) {
-      this.controlsVisible = false;
       this.menuVisible = false;
+      this.getUIContext().animateTo({ curve: curves.springMotion() }, () => {
+        this.controlsVisible = false;
+      });
       return;
     }
     this.updateProgressLabel();
     this.updateBookmarkState();
-    this.controlsVisible = true;
+    this.getUIContext().animateTo({ curve: curves.springMotion() }, () => {
+      this.controlsVisible = true;
+    });
   }
 
   private openPanel(name: string): void {
@@ -1612,7 +1635,13 @@ struct Reader {
         Column() {
           // 面板展开时收起顶部栏：面板从底部控制栏弹出，顶部只留阅读区域
           if (this.panel.length === 0) {
-            this.topBar()
+            Column() {
+              this.topBar()
+            }
+            .width('100%')
+            // 显隐时从顶边滑入，与控制栏整体淡入叠加
+            .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: -12 }))
+              .animation({ curve: curves.springMotion() }))
           }
 
           // 控制栏显示时中间区域吞掉点击与滑动：既不翻页也不滚动，点击即退出控制栏
@@ -1626,13 +1655,13 @@ struct Reader {
           })
 
           Row() {
-            this.bottomTab('☰', '目录', 'catalog')
+            this.bottomTab('目录', 'catalog')
             if (this.book.type === BookType.TEXT) {
-              this.bottomTab('A', '字体', 'font')
+              this.bottomTab('字体', 'font')
             }
-            this.bottomTab('⇅', '操作', 'actions')
-            this.bottomTab('◐', '背景', 'background')
-            this.bottomTab('⧉', '翻页', 'pageturn')
+            this.bottomTab('操作', 'actions')
+            this.bottomTab('背景', 'background')
+            this.bottomTab('翻页', 'pageturn')
           }
           .width('100%')
           .height(58)
@@ -1641,6 +1670,9 @@ struct Reader {
           .padding({ left: 4, right: 4 })
           .onClick(() => {
           })
+          // 显隐时从底边滑入
+          .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: 16 }))
+            .animation({ curve: curves.springMotion() }))
         }
         .width('100%')
         .height('100%')
@@ -1649,6 +1681,8 @@ struct Reader {
           // 左右 16vp / 底部 22vp 的空白不落到正文上：否则会走正文的单击逻辑把控制栏关掉
           this.tapControlsBackground();
         })
+        // if 分支增删时整块淡入淡出，配合上下栏各自的滑入
+        .transition(TransitionEffect.OPACITY.animation({ curve: curves.springMotion() }))
       }
 
       // 设置按钮的下拉菜单：盖在控制栏之上，点空白处或再点按钮收起
