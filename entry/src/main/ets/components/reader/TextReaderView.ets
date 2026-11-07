@@ -32,8 +32,6 @@ const PAGE_PREFETCH_NEXT_DELAY = 220;
 const PAGE_PREFETCH_PREV_DELAY = 560;
 // 点击分区：两侧 30% 翻页（左右模式翻页 / 上下模式翻屏），中间 40% 唤起控制栏
 const TAP_SIDE_RATIO = 0.3;
-// 正文点击去抖：双击选词会连发两次 click，200ms 内的第二次忽略
-const TEXT_TAP_GUARD = 200;
 // 选区锁时长（按下起算）：Text 开了 copyOption 后系统自带"双击选词"，
 // 快速连点翻页正好构成双击。每次触摸按下都锁 400ms 并续锁：
 // 双击第二下永远落在锁定期内不触发选择；长按需按住 500ms+，
@@ -580,8 +578,11 @@ export struct TextReaderView {
   private lastWidth: number = 0;
   private lastHeight: number = 0;
   private lastReportTime: number = 0;
-  // 正文点击去抖时间戳（双击选词连发的第二次 click）
-  private lastTextTapAt: number = 0;
+  // 程序性翻页的逻辑目标页：翻页动画最长 520ms，期间 Swiper 的 onChange 尚未回传新索引，
+  // 快速连点时若仍以 currentPage 为基准，每次都算出同一个目标页导致只翻一页。
+  // 动画落地（onChange 回传目标页）前，连点以该逻辑页为基准逐次累加
+  private turnTargetPage: number = -1;
+  private turnTargetAt: number = 0;
   // 触摸按下后的选区锁：锁定期内禁用文本选择（防双击选词），松手自解
   @State selectionLocked: boolean = false;
   private selectionUnlockTimer: number = -1;
@@ -1243,6 +1244,7 @@ export struct TextReaderView {
     this.pageWindowEnd = center;
     this.loadingPageChapters.clear();
     this.beginPageSync();
+    this.turnTargetPage = -1;
     this.pageSource.reset(items);
     this.pagedReady = true;
     const index = this.findPageIndex(center, charOffset);
@@ -1396,6 +1398,10 @@ export struct TextReaderView {
     const total = this.pageSource.totalCount();
     if (index < 0 || index >= total) {
       return;
+    }
+    // Swiper 动画落地到逻辑目标页：连点累加结束，翻页基准回归 currentPage
+    if (index === this.turnTargetPage) {
+      this.turnTargetPage = -1;
     }
     // 数据源重建 / 索引补偿期间，Swiper 会先落到临时索引，不能当成用户翻页
     if (this.pageSyncLock) {
@@ -1691,14 +1697,9 @@ export struct TextReaderView {
   /**
    * 正文上的单击：可选中文本后，文字会吃掉根容器上的 onClick，
    * 所以每块正文自己也挂一份，坐标用窗口坐标（点击点相对自身的 x/y 不能用）。
-   * 双击选词会连发两次 click，这里做 200ms 去抖，避免"开了控制栏又马上关掉/连翻两页"。
+   * 不做去抖：快速连点时每一击都应翻一页，双击选词已由触摸侧选区锁拦截。
    */
   private handleTextTap(event: ClickEvent): void {
-    const now = Date.now();
-    if (now - this.lastTextTapAt < TEXT_TAP_GUARD) {
-      return;
-    }
-    this.lastTextTapAt = now;
     this.applyTap(event.windowX, event.windowY);
   }
 
@@ -1757,23 +1758,30 @@ export struct TextReaderView {
   /**
    * 左右模式点击翻页。已在窗口端部时先补相邻章，补完后等补偿锁释放再翻，
    * 否则本次翻页会被 beginPageSync 的 48ms 锁吞掉。
+   * 基准页用 turnTargetPage（动画未落地时是上一击的逻辑目标），
+   * 保证快速连点时每一击各翻一页，不因 currentPage 迟迟不更新而重复翻同一页。
    */
   private async turnPage(delta: number): Promise<void> {
     const total = this.pageSource.totalCount();
     if (total === 0) {
       return;
     }
-    let target = this.currentPage + delta;
+    const now = Date.now();
+    const ttl = this.turnDuration() + 80;
+    const base = this.turnTargetPage >= 0 && now - this.turnTargetAt < ttl
+      ? this.turnTargetPage
+      : this.currentPage;
+    let target = base + delta;
     let needSync = false;
     if (target < 0) {
-      if (this.pageWindowStart <= 0) {
+      if (this.pageWindowStart <= 0 || base !== this.currentPage) {
         return;
       }
       await this.prependPrevChapter(this.pageWindowStart - 1);
       target = this.currentPage - 1;
       needSync = true;
     } else if (target >= total) {
-      if (this.pageWindowEnd >= this.chapterCount - 1) {
+      if (this.pageWindowEnd >= this.chapterCount - 1 || base !== this.currentPage) {
         return;
       }
       await this.appendNextChapter(this.pageWindowEnd + 1);
@@ -1789,9 +1797,11 @@ export struct TextReaderView {
       this.scheduleOnce((): void => {
         this.swiperController.changeIndex(target, animated);
       }, 60);
-      return;
+    } else {
+      this.swiperController.changeIndex(target, animated);
     }
-    this.swiperController.changeIndex(target, animated);
+    this.turnTargetPage = target;
+    this.turnTargetAt = now;
   }
 
   /** 上下模式点击翻屏：按可视高度滚动一屏，跨章自然滚过章标题 */
