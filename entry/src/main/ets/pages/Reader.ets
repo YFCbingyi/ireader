@@ -546,8 +546,17 @@ struct Reader {
     this.cacheKeys.push(key);
   }
 
+  /** 从目录 / 笔记 / 搜索跳回原文：面板与控制栏一起收起，落位后即可直接翻页 */
+  private enterReading(): void {
+    this.getUIContext().animateTo({ curve: curves.springMotion() }, () => {
+      this.panel = '';
+      this.menuVisible = false;
+      this.controlsVisible = false;
+    });
+  }
+
   private jumpToChapter(index: number): void {
-    this.panel = '';
+    this.enterReading();
     this.openChapter(index, 0, 0, 0, true);
   }
 
@@ -946,7 +955,7 @@ struct Reader {
   }
 
   private jumpToBookmark(bookmark: Bookmark): void {
-    this.panel = '';
+    this.enterReading();
     this.openChapter(bookmark.chapterIndex, bookmark.charOffset, bookmark.pageIndex,
       bookmark.scrollRatio, true);
   }
@@ -1065,7 +1074,7 @@ struct Reader {
   }
 
   private jumpToAnnotation(annotation: Annotation): void {
-    this.panel = '';
+    this.enterReading();
     this.openChapter(annotation.chapterIndex, annotation.start, 0, 0, true);
   }
 
@@ -1295,7 +1304,7 @@ struct Reader {
   }
 
   private jumpToSearchHit(hit: SearchHit): void {
-    this.panel = '';
+    this.enterReading();
     this.openChapter(hit.chapterIndex, hit.charOffset, 0, 0, true);
   }
 
@@ -1970,6 +1979,12 @@ struct Reader {
           searchHistory: this.searchHistory,
           onClose: (): void => {
             this.panel = '';
+            if (this.searchRunning) {
+              this.cancelSearch();
+            }
+          },
+          onDismissToReading: (): void => {
+            this.enterReading();
             if (this.searchRunning) {
               this.cancelSearch();
             }
