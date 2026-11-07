@@ -70,6 +70,8 @@ export struct ReaderPanels {
   @Prop searchHistory: string[] = [];
 
   onClose: () => void = (): void => {};
+  // 点面板外的正文区遮罩：连控制栏一起收起，直接回到可翻页的阅读状态
+  onDismissToReading: () => void = (): void => {};
   onSelectChapter: (index: number) => void = (index: number): void => {};
   onSelectBookmark: (bookmark: Bookmark) => void = (bookmark: Bookmark): void => {};
   onDeleteBookmark: (bookmark: Bookmark) => void = (bookmark: Bookmark): void => {};
@@ -1656,7 +1658,7 @@ export struct ReaderPanels {
           .layoutWeight(1)
           .backgroundColor('#66000000')
           .onClick(() => {
-            this.onClose();
+            this.onDismissToReading();
           })
         Column()
           .width('100%')
