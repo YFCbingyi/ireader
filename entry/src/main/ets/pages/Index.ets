@@ -52,6 +52,8 @@ struct Index {
   @State newGroupName: string = '';
   @State topInset: number = 0;
   @State bottomInset: number = 0;
+  // 「我的」页刷新信号：从阅读页返回时让统计组件重新取数
+  @State profileRefresh: number = 0;
   // 顶部浮动栏实测高度：内容区用它做首屏留白，滚动后内容才能滑进模糊区
   @State topBarHeight: number = 0;
   // 深色模式：EntryAbility 在创建与配置变更时写入，页面只做消费
@@ -88,6 +90,7 @@ struct Index {
   onPageShow(): void {
     this.exitSelect();
     this.loadBooks();
+    this.profileRefresh++;
     this.ensureFullScreenWindow();
     this.refreshInsets();
     // 阅读页恢复系统栏是异步操作，稍后再测量一次安全区，避免拿到旧值
@@ -1498,7 +1501,11 @@ struct Index {
           DiscoverPanel()
         } else {
           // 底部留白与书架一致：内容滚到底也能穿过导航胶囊，被毛玻璃糊掉
-          ProfilePanel({ bottomInset: this.bottomInset + 24, topInset: this.topGapHeight() })
+          ProfilePanel({
+            bottomInset: this.bottomInset + 24,
+            topInset: this.topGapHeight(),
+            refreshTick: this.profileRefresh
+          })
         }
       }
       .width('100%')
