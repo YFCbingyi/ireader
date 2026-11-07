@@ -41,6 +41,16 @@ const SEARCH_MAX_HITS = 200;
 const SEARCH_SNIPPET_CHARS = 28;
 const SEARCH_PROGRESS_INTERVAL = 150;
 const SEARCH_HISTORY_LIMIT = 10;
+// 下拉书签：只在左右翻页模式生效（上下连续卷轴模式的下拉是正常滚动，不支持）。
+// 整页 1:1 跟随手指下移，越过阈值后松手切换书签，上方露出参考图那样的灰色幕布
+const BOOKMARK_PULL_TRIGGER = 80;
+const BOOKMARK_PULL_MAX = 300;
+// 书签丝带：宽 / 底部 V 口刻线深度 / 静态高度 / 下拉最大拉伸
+// 36×56vp 约为原来的 2.5 倍面积，静态时右上角一眼可见
+const BOOKMARK_RIBBON_W = 36;
+const BOOKMARK_RIBBON_TIP = 14;
+const BOOKMARK_RIBBON_MIN_H = 56;
+const BOOKMARK_RIBBON_STRETCH = 120;
 
 @Entry
 @Component
@@ -81,6 +91,12 @@ struct Reader {
   @State startImageRatio: number = 0;
   @State progressLabel: string = '';
   @State bookmarked: boolean = false;
+  // 下拉书签：当前下拉位移、是否越过阈值（两者驱动顶部角标与提示文案）
+  @State pullOffset: number = 0;
+  @State pullReached: boolean = false;
+  private pullTracking: boolean = false;
+  private pullStartX: number = 0;
+  private pullStartY: number = 0;
   @State theme: ReadingTheme = ReadingTheme.EYE;
   @State palette: ReaderThemeColors = ReaderTheme.eye();
   // 图片书面板专用深色色板：只建一次，避免每次渲染都给子组件传新对象导致整面板重建
@@ -553,11 +569,12 @@ struct Reader {
       this.chapterIndex = chapterIndex;
       this.chapterTitle = this.chapterTitleOf(chapterIndex);
     }
-    // 控制栏未显示时无需刷新可见文案，避免滚动过程中反复触发重建
+    // 控制栏未显示时无需刷新可见文案，避免滚动过程中反复触发重建；
+    // 书签角标需要跟着当前位置走，所以状态始终重算（值不变不会触发重建）
     if (this.controlsVisible) {
       this.updateProgressLabel();
-      this.updateBookmarkState();
     }
+    this.updateBookmarkState();
     this.scheduleSave();
   }
 
@@ -572,8 +589,8 @@ struct Reader {
     }
     if (this.controlsVisible) {
       this.updateProgressLabel();
-      this.updateBookmarkState();
     }
+    this.updateBookmarkState();
     this.scheduleSave();
   }
 
@@ -680,6 +697,208 @@ struct Reader {
       }
     }
     this.bookmarked = found;
+  }
+
+  /** 下拉书签只在左右翻页模式的纯阅读态生效：上下滚动模式 / 控制栏 / 面板 / 弹窗均不接管 */
+  private canPullBookmark(): boolean {
+    return this.readingMode === ReadingMode.HORIZONTAL && !this.loading &&
+      this.errorText.length === 0 && !this.controlsVisible && !this.turnMaskVisible &&
+      this.panel.length === 0 && !this.menuVisible && !this.noteVisible && !this.dictVisible;
+  }
+
+  private resetPull(): void {
+    this.pullTracking = false;
+    // 保留 pullReached 直到整页回弹结束，提示文案不会在回弹瞬间闪回"下拉"
+    if (this.pullOffset > 0) {
+      this.getUIContext().animateTo({
+        duration: 220,
+        curve: Curve.EaseOut,
+        onFinish: (): void => {
+          this.pullReached = false;
+        }
+      }, () => {
+        this.pullOffset = 0;
+      });
+    }
+  }
+
+  /**
+   * 下拉切换书签：只在顶部页眉区起手（正文滚动 / 翻页不受影响），
+   * 向下越过阈值即"蓄力"，松手前上滑回退就取消，松手才真正执行。
+   */
+  private handlePullTouch(event: TouchEvent): void {
+    if (!this.canPullBookmark()) {
+      this.resetPull();
+      return;
+    }
+    if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      // 系统若因其它手势胜出发来 Cancel，已越过阈值也照样执行，避免"拉了没反应"
+      const fire: boolean = this.pullTracking && this.pullReached;
+      this.resetPull();
+      if (fire) {
+        this.toggleBookmark();
+      }
+      return;
+    }
+    const touch: TouchObject | undefined = event.touches[0];
+    if (touch === undefined) {
+      return;
+    }
+    if (event.type === TouchType.Down) {
+      // 左右模式没有纵向滚动，整页任意位置起手都算下拉
+      this.pullTracking = true;
+      this.pullReached = false;
+      this.pullOffset = 0;
+      this.pullStartX = touch.x;
+      this.pullStartY = touch.y;
+      this.updateBookmarkState();
+      return;
+    }
+    if (event.type !== TouchType.Move || !this.pullTracking) {
+      return;
+    }
+    const dy: number = touch.y - this.pullStartY;
+    const dx: number = Math.abs(touch.x - this.pullStartX);
+    if (dy <= 0 || dx > dy) {
+      this.pullOffset = 0;
+      this.pullReached = false;
+      return;
+    }
+    this.pullOffset = Math.min(dy, BOOKMARK_PULL_MAX);
+    const reached: boolean = dy >= BOOKMARK_PULL_TRIGGER;
+    if (reached !== this.pullReached) {
+      // 阈值跨越用弹簧过渡：丝带提亮 / 缩放 / 光晕是连续反馈，不是硬切
+      this.getUIContext().animateTo({ curve: curves.springMotion(0.32, 0.78) }, () => {
+        this.pullReached = reached;
+      });
+    }
+  }
+
+  private pullHintLabel(): string {
+    if (this.pullReached) {
+      return this.bookmarked ? '↑ 松手删除书签' : '↑ 松手添加书签';
+    }
+    return this.bookmarked ? '↓ 下拉删除书签' : '↓ 下拉添加书签';
+  }
+
+  /** 灰色幕布上的提示：半透明底 + 细描边 + 状态灯（API 24 下的轻量光感，不用系统材质） */
+  @Builder
+  pullGuide() {
+    Row() {
+      Row() {
+        Circle()
+          .width(6)
+          .height(6)
+          .fill(this.pullReached ? '#FFFFFF' : '#80FFFFFF')
+          .margin({ right: 8 })
+        Text(this.pullHintLabel())
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#FFFFFF')
+      }
+      .height(30)
+      .padding({ left: 12, right: 12 })
+      .backgroundColor(this.pullReached ? '#4D000000' : '#33000000')
+      .border({ width: 1, color: '#30FFFFFF' })
+      .borderRadius(15)
+    }
+    .width('100%')
+    .height(64)
+    .padding({ right: 70, top: 22 })
+    .justifyContent(FlexAlign.End)
+    .alignItems(VerticalAlign.Top)
+    .hitTestBehavior(HitTestMode.None)
+    .position({ x: 0, y: 0 })
+    .opacity(Math.min(1, this.pullOffset / 40))
+  }
+
+  /**
+   * 布面折光书签：主体用实心色块（不依赖 Path 填充，稳定可见），
+   * 叠加受光面 / 背光面 / 蓄力提亮 / V 口刻线 / 双层金属眼做分层设色。
+   */
+  @Builder
+  ribbonShape(height: number, active: boolean) {
+    Stack({ alignContent: Alignment.TopStart }) {
+      Column()
+        .width(BOOKMARK_RIBBON_W)
+        .height(height)
+        .backgroundColor(this.palette.accent)
+        .borderRadius({ bottomLeft: 6, bottomRight: 6 })
+        .shadow({ radius: active ? 20 : 10, color: '#40000000', offsetX: 0, offsetY: 5 })
+
+      if (active) {
+        Column()
+          .width(BOOKMARK_RIBBON_W)
+          .height(height)
+          .backgroundColor('#1AFFFFFF')
+          .borderRadius({ bottomLeft: 6, bottomRight: 6 })
+      }
+
+      // 左侧受光面
+      Column()
+        .width(9)
+        .height(height)
+        .backgroundColor('#26FFFFFF')
+        .borderRadius({ bottomLeft: 6, bottomRight: 0 })
+
+      // 右侧背光面
+      Column()
+        .width(9)
+        .height(height)
+        .backgroundColor('#22000000')
+        .borderRadius({ bottomLeft: 0, bottomRight: 6 })
+        .position({ x: BOOKMARK_RIBBON_W - 9, y: 0 })
+
+      // V 口刻线：即使 Path 描边不显示，主体色块依然完整
+      Path()
+        .width(BOOKMARK_RIBBON_W)
+        .height(height)
+        .commands(`M 0 ${height - 1} L ${BOOKMARK_RIBBON_W / 2} ${height - BOOKMARK_RIBBON_TIP} L ${BOOKMARK_RIBBON_W} ${height - 1}`)
+        .fill('#00000000')
+        .stroke('#80FFFFFF')
+        .strokeWidth(1.2)
+
+      Circle()
+        .width(10)
+        .height(10)
+        .fill('#33000000')
+        .position({ x: BOOKMARK_RIBBON_W / 2 - 5, y: 10 })
+      Circle()
+        .width(5)
+        .height(5)
+        .fill('#CCFFFFFF')
+        .position({ x: BOOKMARK_RIBBON_W / 2 - 2.5, y: 12.5 })
+    }
+    .width(BOOKMARK_RIBBON_W)
+    .height(height)
+    .opacity(active ? 1 : 0.86)
+    .scale({ x: active ? 1.06 : 1, y: active ? 1.06 : 1 })
+    .transition(TransitionEffect.OPACITY.combine(TransitionEffect.scale({ x: 0.7, y: 0.7 }))
+      .animation({ curve: curves.springMotion(0.32, 0.78) }))
+  }
+
+  /** 右上角书签丝带：下拉时随幅度拉长；平时已加书签是小丝带，未加且左右模式给下拉提示 */
+  @Builder
+  bookmarkRibbon() {
+    Column() {
+      if (this.pullOffset > 0) {
+        this.ribbonShape(BOOKMARK_RIBBON_MIN_H + Math.min(this.pullOffset, BOOKMARK_RIBBON_STRETCH),
+          this.pullReached)
+      } else if (this.bookmarked) {
+        this.ribbonShape(BOOKMARK_RIBBON_MIN_H, true)
+      } else if (this.canPullBookmark()) {
+        // 纯文字提示，不再用一个白底小方块承载
+        Text('↓ 下拉加书签')
+          .fontSize(11)
+          .fontColor(this.palette.subText)
+      }
+    }
+    .width('100%')
+    .height(BOOKMARK_RIBBON_MIN_H + BOOKMARK_RIBBON_STRETCH + 20)
+    .alignItems(HorizontalAlign.End)
+    .padding({ right: 24 })
+    .hitTestBehavior(HitTestMode.None)
+    .position({ x: 0, y: 0 })
   }
 
   private toggleBookmark(): void {
@@ -1547,6 +1766,20 @@ struct Reader {
 
   build() {
     Stack() {
+      // 下拉时先铺一层柔和的灰色渐变幕布，整页下移后从上方露出
+      if (this.pullOffset > 0) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .linearGradient({
+            angle: 180,
+            colors: [['#5E5E5E', 0.0], ['#909090', 1.0]]
+          })
+          .hitTestBehavior(HitTestMode.None)
+      }
+
+      // 整页内容：下拉书签时整体下移，上方露出灰色幕布（参照掌阅）
+      Column() {
       if (this.loading) {
         this.loadingView()
       } else if (this.errorText.length > 0) {
@@ -1639,6 +1872,10 @@ struct Reader {
           }
         })
       }
+      }
+      .width('100%')
+      .height('100%')
+      .translate({ y: this.pullOffset })
 
       if (this.turnMaskVisible && !this.loading && this.errorText.length === 0) {
         Column()
@@ -1806,6 +2043,27 @@ struct Reader {
 
       if (this.dictVisible && !this.loading && this.errorText.length === 0) {
         this.dictCard()
+      }
+
+      // 上下滚动模式不显示任何下拉引导（该模式不支持），但已有书签仍显示金带
+      if (!this.controlsVisible && !this.loading && this.errorText.length === 0 &&
+        (this.pullOffset > 0 || this.bookmarked || this.canPullBookmark())) {
+        this.bookmarkRibbon()
+        if (this.pullOffset > 0) {
+          this.pullGuide()
+        }
+      }
+
+      if (this.canPullBookmark()) {
+        // 透明手势层置于最上层：Transparent 保证自己收到完整触摸流，
+        // 同时被它遮住的正文/翻页/长按仍照常命中，不影响原有交互
+        Column()
+          .width('100%')
+          .height('100%')
+          .hitTestBehavior(HitTestMode.Transparent)
+          .onTouch((event: TouchEvent) => {
+            this.handlePullTouch(event);
+          })
       }
     }
     .width('100%')
