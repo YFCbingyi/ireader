@@ -1,20 +1,24 @@
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { picker } from '@kit.CoreFileKit';
 import { BookMeta, ReaderParams } from '../model/BookModels';
 import { DailyReading } from '../model/ReadingStats';
 import { ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
 import { AppBootstrap } from '../service/AppBootstrap';
-import { HabitSummary, HeatDay, HeatWeek, ProfileStats, ShelfSummary } from '../service/ProfileStats';
+import { BackupService } from '../service/BackupService';
+import { HabitSummary, HeatDay, HeatWeek, NoteEntry, NoteSummary, ProfileStats, ShelfSummary } from '../service/ProfileStats';
 import { LibraryStore } from '../service/LibraryStore';
 import { ReadingStatsStore } from '../service/ReadingStatsStore';
+import { FileUtil } from '../utils/FileUtil';
 
 // 与 AppScope/app.json5 的 versionName 保持一致
 const APP_VERSION = '1.0.0';
-// 设置行点击分发：0 数据明细 / 1 关于 / 2 隐私 / 3 清空统计
+// 设置行点击分发：0 数据明细 / 1 关于 / 2 隐私 / 3 清空统计 / 4 导出备份
 const KIND_DATA = 0;
 const KIND_ABOUT = 1;
 const KIND_PRIVACY = 2;
 const KIND_CLEAR = 3;
+const KIND_EXPORT = 4;
 
 @Component
 export struct ProfilePanel {
@@ -39,18 +43,23 @@ export struct ProfilePanel {
   @State shelfDetail: string = '';
   @State storageText: string = '统计中…';
   // @Builder 按值传参不会随状态刷新，数值统一放状态数组，在 builder 内部按索引读取
-  @State statValues: string[] = ['0 天', '0 天', '0 本', '0 秒', '0 秒', '0 秒'];
-  @State settingValues: string[] = ['统计中…', '', '应用沙箱', `版本 ${APP_VERSION}`,
-    '纯本地 · 无账号', '不可恢复'];
+  @State statValues: string[] = ['0 天', '0 天', '0 本', '0 秒', '0 秒', '0 秒', '0 条', '0 条', '0 条'];
+  @State settingValues: string[] = ['统计中…', '', '应用沙箱', 'JSON 快照',
+    `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复'];
+  @State noteSummary: NoteSummary = new NoteSummary();
+  @State recentNotes: NoteEntry[] = [];
   @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
     ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
   @State palette: ShelfThemeColors = ShelfTheme.light();
 
-  private settingLabels: string[] = ['本地占用', '数据明细', '存储位置', '关于 ireader', '隐私说明', '清空阅读统计'];
-  private settingKinds: number[] = [KIND_DATA, KIND_DATA, KIND_PRIVACY, KIND_ABOUT, KIND_PRIVACY, KIND_CLEAR];
-  private settingDanger: boolean[] = [false, false, false, false, false, true];
+  private settingLabels: string[] = ['本地占用', '数据明细', '存储位置', '导出备份',
+    '关于 ireader', '隐私说明', '清空阅读统计'];
+  private settingKinds: number[] = [KIND_DATA, KIND_DATA, KIND_PRIVACY, KIND_EXPORT,
+    KIND_ABOUT, KIND_PRIVACY, KIND_CLEAR];
+  private settingDanger: boolean[] = [false, false, false, false, false, false, true];
   private continueBookId: string = '';
-  private sizeTimer: number = -1;
+  private booksSnapshot: BookMeta[] = [];
+  private slowTimer: number = -1;
   private destroyed: boolean = false;
 
   aboutToAppear(): void {
@@ -58,14 +67,14 @@ export struct ProfilePanel {
     AppBootstrap.init(this.getUIContext().getHostContext() as common.UIAbilityContext);
     this.applyPalette();
     this.loadStats();
-    this.scheduleStorageSize();
+    this.scheduleSlowData();
   }
 
   aboutToDisappear(): void {
     this.destroyed = true;
-    if (this.sizeTimer !== -1) {
-      clearTimeout(this.sizeTimer);
-      this.sizeTimer = -1;
+    if (this.slowTimer !== -1) {
+      clearTimeout(this.slowTimer);
+      this.slowTimer = -1;
     }
   }
 
@@ -81,8 +90,9 @@ export struct ProfilePanel {
   }
 
   private onRefreshTick(): void {
-    // 占用仅在组件创建时算一次；统计刷新不重复遍历整个沙箱
+    // 占用只在组件创建时算一次；笔记每次从阅读页返回都要重取
     this.loadStats();
+    this.scheduleSlowData();
   }
 
   private loadStats(): void {
@@ -92,6 +102,7 @@ export struct ProfilePanel {
     this.todayText = ReadingStatsStore.formatDuration(
       this.week.length > 0 ? this.week[this.week.length - 1].seconds : 0);
     const books = LibraryStore.getBooks();
+    this.booksSnapshot = books;
     this.bookCount = books.length;
     this.todayKey = ReadingStatsStore.todayKey();
     this.habit = ProfileStats.habit(stats);
@@ -99,20 +110,27 @@ export struct ProfilePanel {
     this.heatWeeks = ProfileStats.heatWeeks(stats);
     this.shelf = ProfileStats.shelf(books);
     this.shelfDetail = `${this.bookCount} 本 · ${this.shelf.chapterCount} 章`;
+    this.refreshStatValues();
+    this.refreshSettingValues();
+    this.loadContinue(books);
+  }
+
+  private refreshStatValues(): void {
     this.statValues = [
       `${this.readDayCount} 天`,
       `${this.habit.streak} 天`,
       `${this.bookCount} 本`,
       ProfileStats.shortDuration(this.habit.weekSeconds),
       ProfileStats.shortDuration(this.habit.averageSeconds),
-      ProfileStats.shortDuration(this.habit.bestSeconds)
+      ProfileStats.shortDuration(this.habit.bestSeconds),
+      `${this.noteSummary.highlightCount} 条`,
+      `${this.noteSummary.noteCount} 条`,
+      `${this.noteSummary.bookmarkCount} 条`
     ];
-    this.refreshSettingValues();
-    this.loadContinue(books);
   }
 
   private refreshSettingValues(): void {
-    this.settingValues = [this.storageText, this.shelfDetail, '应用沙箱',
+    this.settingValues = [this.storageText, this.shelfDetail, '应用沙箱', 'JSON 快照',
       `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复'];
   }
 
@@ -133,21 +151,60 @@ export struct ProfilePanel {
     this.continueAction = this.continuePercent > 0 ? '继续阅读' : '开始阅读';
   }
 
-  /** 递归统计沙箱占用可能稍慢，放到首帧之后算一次，避免进页面卡顿 */
-  private scheduleStorageSize(): void {
-    if (this.sizeTimer !== -1) {
-      clearTimeout(this.sizeTimer);
+  /** 逐书读笔记 + 递归统计沙箱都较慢，放到首帧之后统一算，避免进页面卡顿 */
+  private scheduleSlowData(): void {
+    if (this.slowTimer !== -1) {
+      clearTimeout(this.slowTimer);
     }
-    this.storageText = '统计中…';
-    this.refreshSettingValues();
-    this.sizeTimer = setTimeout(() => {
-      this.sizeTimer = -1;
+    this.slowTimer = setTimeout(() => {
+      this.slowTimer = -1;
       if (this.destroyed) {
         return;
       }
-      this.storageText = ProfileStats.formatSize(ProfileStats.storageBytes());
-      this.refreshSettingValues();
-    }, 120);
+      if (this.storageText === '统计中…') {
+        this.storageText = ProfileStats.formatSize(ProfileStats.storageBytes());
+        this.refreshSettingValues();
+      }
+      this.noteSummary = ProfileStats.notes(this.booksSnapshot);
+      this.recentNotes = this.noteSummary.recent;
+      this.refreshStatValues();
+    }, 150);
+  }
+
+  /** 点最近笔记：带上章号与章内偏移，阅读页会直接落到划线位置 */
+  private async openNote(entry: NoteEntry): Promise<void> {
+    const params = new ReaderParams();
+    params.bookId = entry.bookId;
+    params.jumpChapter = entry.chapterIndex;
+    params.jumpOffset = entry.charOffset;
+    try {
+      await this.getUIContext().getRouter().pushUrl({ url: 'pages/Reader', params: params });
+    } catch (e) {
+      const err = e as BusinessError;
+      this.toast(`打开失败：${err.message}`);
+    }
+  }
+
+  /** 导出阅读数据：由用户选保存位置，写入一个 JSON（不含书籍正文与图片） */
+  private async exportBackup(): Promise<void> {
+    try {
+      const options = new picker.DocumentSaveOptions();
+      options.newFileNames = [`ireader-backup-${ReadingStatsStore.todayKey()}.json`];
+      options.fileSuffixChoices = ['JSON 文件|.json'];
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const docPicker = new picker.DocumentViewPicker(context);
+      const uris: string[] = await docPicker.save(options);
+      if (uris.length === 0) {
+        return;
+      }
+      FileUtil.writeUriText(uris[0], BackupService.buildJson());
+      this.toast('阅读数据已导出（不含书籍正文）');
+    } catch (e) {
+      const err = e as BusinessError;
+      if (err.message !== undefined && err.message.length > 0) {
+        this.toast(`导出失败：${err.message}`);
+      }
+    }
   }
 
   private async openContinueBook(): Promise<void> {
@@ -187,6 +244,10 @@ export struct ProfilePanel {
       this.showPrivacyDialog();
       return;
     }
+    if (kind === KIND_EXPORT) {
+      this.exportBackup();
+      return;
+    }
     this.confirmClearStats();
   }
 
@@ -195,6 +256,7 @@ export struct ProfilePanel {
       title: '本机数据',
       message: `书籍 ${this.bookCount} 本 · 章节 ${this.shelf.chapterCount} 章 · 分组 ${this.shelf.groupCount} 个\n` +
         `笔记文件 ${this.shelf.noteFileCount} 份 · 书签文件 ${this.shelf.bookmarkFileCount} 份\n` +
+        `划线 ${this.noteSummary.highlightCount} 条 · 想法 ${this.noteSummary.noteCount} 条 · 书签 ${this.noteSummary.bookmarkCount} 条\n` +
         `在读 ${this.shelf.readingCount} 本 · 已读完 ${this.shelf.finishedCount} 本 · 未开始 ${this.shelf.unreadCount} 本\n` +
         `平均完成度 ${this.shelf.averagePercent}% · 共占用 ${this.storageText}`,
       primaryButton: { value: '知道了', action: () => {} },
@@ -546,6 +608,104 @@ export struct ProfilePanel {
   }
 
   @Builder
+  noteCard() {
+    Column() {
+      Row() {
+        Text('我的笔记')
+          .fontSize(13)
+          .fontColor(this.palette.subtleText)
+        Blank()
+        Text(`${this.noteSummary.highlightCount + this.noteSummary.noteCount} 条记录`)
+          .fontSize(11)
+          .fontColor(this.palette.subtleText)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+
+      Row() {
+        this.statCell('划线', 6)
+        Divider().vertical(true).height(32).color(this.palette.chipBg)
+        this.statCell('想法', 7)
+        Divider().vertical(true).height(32).color(this.palette.chipBg)
+        this.statCell('书签', 8)
+      }
+      .width('100%')
+      .height(50)
+      .alignItems(VerticalAlign.Center)
+      .margin({ top: 8 })
+
+      if (this.recentNotes.length === 0) {
+        Text('划选正文即可添加划线或想法，记录会出现在这里。')
+          .width('100%')
+          .fontSize(12)
+          .fontColor(this.palette.subtleText)
+          .margin({ top: 12 })
+      } else {
+        Column() {
+          ForEach(this.recentNotes, (item: NoteEntry, index: number) => {
+            Column() {
+              if (index > 0) {
+                Divider().color(this.palette.chipBg)
+              }
+              Row() {
+                Text(item.kind === 1 ? '想法' : '划线')
+                  .fontSize(10)
+                  .fontColor(this.palette.accentText)
+                  .padding({ left: 6, right: 6, top: 2, bottom: 2 })
+                  .borderRadius(6)
+                  .backgroundColor(this.palette.accent)
+                Text(item.quote.length > 0 ? item.quote : '（无原文）')
+                  .fontSize(13)
+                  .fontColor(this.palette.text)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .layoutWeight(1)
+                  .margin({ left: 8 })
+                Text('›')
+                  .fontSize(15)
+                  .fontColor(this.palette.subtleText)
+              }
+              .width('100%')
+              .alignItems(VerticalAlign.Center)
+
+              Text(`${item.bookTitle} · 第 ${item.chapterIndex + 1} 章`)
+                .width('100%')
+                .fontSize(11)
+                .fontColor(this.palette.subtleText)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .margin({ top: 6 })
+
+              if (item.note.length > 0) {
+                Text(`想法：${item.note}`)
+                  .width('100%')
+                  .fontSize(11)
+                  .fontColor(this.palette.chipText)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .margin({ top: 4 })
+              }
+            }
+            .width('100%')
+            .padding({ top: 12, bottom: 12 })
+            .onClick(() => {
+              this.openNote(item);
+            })
+          }, (item: NoteEntry) => `${item.id}_${item.quote}_${item.note}`)
+        }
+        .width('100%')
+        .margin({ top: 6 })
+      }
+    }
+    .width('100%')
+    .padding(20)
+    .margin({ top: 12 })
+    .borderRadius(16)
+    .backgroundColor(this.palette.surface)
+    .border({ width: 1, color: this.palette.chipBg })
+  }
+
+  @Builder
   sectionTitle(title: string) {
     Text(title)
       .width('100%')
@@ -596,6 +756,8 @@ export struct ProfilePanel {
         this.settingRow(1)
         this.settingDivider()
         this.settingRow(2)
+        this.settingDivider()
+        this.settingRow(3)
       }
       .width('100%')
       .borderRadius(16)
@@ -604,9 +766,9 @@ export struct ProfilePanel {
 
       this.sectionTitle('关于')
       Column() {
-        this.settingRow(3)
-        this.settingDivider()
         this.settingRow(4)
+        this.settingDivider()
+        this.settingRow(5)
       }
       .width('100%')
       .borderRadius(16)
@@ -615,7 +777,7 @@ export struct ProfilePanel {
 
       this.sectionTitle('危险操作')
       Column() {
-        this.settingRow(5)
+        this.settingRow(6)
       }
       .width('100%')
       .borderRadius(16)
@@ -633,6 +795,7 @@ export struct ProfilePanel {
         this.statsGrid()
         this.weeklyCard()
         this.heatmapCard()
+        this.noteCard()
         this.settingsArea()
 
         Text('阅读时长按页面停留累计，应用进入后台或退出阅读页后停止计时；每日记录最多保留 90 天。')
@@ -642,6 +805,12 @@ export struct ProfilePanel {
           .lineHeight(18)
           .margin({ top: 18 })
         Text('统计只保存在本机，清空统计不会影响书架里的书与阅读进度。')
+          .width('100%')
+          .fontSize(11)
+          .fontColor(this.palette.subtleText)
+          .lineHeight(18)
+          .margin({ top: 4 })
+        Text('导出的备份只包含进度、书签、划线、统计与设置，不含书籍正文和图片。')
           .width('100%')
           .fontSize(11)
           .fontColor(this.palette.subtleText)

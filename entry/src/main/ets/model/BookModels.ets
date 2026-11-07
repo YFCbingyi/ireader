@@ -193,6 +193,9 @@ export class SearchHit {
 
 export class ReaderParams {
   bookId: string = '';
+  /** 可选：从「我的」页笔记跳到指定章内偏移；-1 表示按上次进度打开 */
+  jumpChapter: number = -1;
+  jumpOffset: number = 0;
 }
 
 /** 打开分组页面时传入的分组名 */
