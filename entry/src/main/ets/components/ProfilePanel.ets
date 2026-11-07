@@ -1,3 +1,4 @@
+import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { picker } from '@kit.CoreFileKit';
@@ -22,39 +23,48 @@ const KIND_CLEAR = 3;
 const KIND_EXPORT = 4;
 const KIND_SKIN = 5;
 
-@Component
+@ComponentV2
 export struct ProfilePanel {
-  @Prop bottomInset: number = 30;
-  @Prop topInset: number = 0;
+  @Param bottomInset: number = 30;
+  @Param topInset: number = 0;
   /** Index.onPageShow 递增，从阅读页返回时强制刷新统计 */
-  @Prop @Watch('onRefreshTick') refreshTick: number = 0;
+  @Param refreshTick: number = 0;
+  @Monitor('refreshTick') onRefreshTickWatch(): void {
+    this.onRefreshTick();
+  }
 
-  @State totalText: string = '0 秒';
-  @State todayText: string = '0 秒';
-  @State readDayCount: number = 0;
-  @State bookCount: number = 0;
-  @State week: DailyReading[] = [];
-  @State todayKey: string = '';
-  @State heatWeeks: HeatWeek[] = [];
-  @State habit: HabitSummary = new HabitSummary();
-  @State shelf: ShelfSummary = new ShelfSummary();
-  @State continueTitle: string = '';
-  @State continueDetail: string = '';
-  @State continueAction: string = '';
-  @State continuePercent: number = 0;
-  @State shelfDetail: string = '';
-  @State storageText: string = '统计中…';
+  @Local totalText: string = '0 秒';
+  @Local todayText: string = '0 秒';
+  @Local readDayCount: number = 0;
+  @Local bookCount: number = 0;
+  @Local week: DailyReading[] = [];
+  @Local todayKey: string = '';
+  @Local heatWeeks: HeatWeek[] = [];
+  @Local habit: HabitSummary = new HabitSummary();
+  @Local shelf: ShelfSummary = new ShelfSummary();
+  @Local continueTitle: string = '';
+  @Local continueDetail: string = '';
+  @Local continueAction: string = '';
+  @Local continuePercent: number = 0;
+  @Local shelfDetail: string = '';
+  @Local storageText: string = '统计中…';
   // @Builder 按值传参不会随状态刷新，数值统一放状态数组，在 builder 内部按索引读取
-  @State statValues: string[] = ['0 天', '0 天', '0 本', '0 秒', '0 秒', '0 秒', '0 条', '0 条', '0 条'];
-  @State settingValues: string[] = ['统计中…', '', '应用沙箱', 'JSON 快照',
+  @Local statValues: string[] = ['0 天', '0 天', '0 本', '0 秒', '0 秒', '0 秒', '0 条', '0 条', '0 条'];
+  @Local settingValues: string[] = ['统计中…', '', '应用沙箱', 'JSON 快照',
     `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复', '金棕'];
-  @State noteSummary: NoteSummary = new NoteSummary();
-  @State recentNotes: NoteEntry[] = [];
-  @State skinPickerVisible: boolean = false;
-  @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
-    ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
-  @StorageProp('appSkin') @Watch('onAppSkinChanged') appSkin: string = AppSkin.GOLD;
-  @State palette: ShelfThemeColors = ShelfTheme.light();
+  @Local noteSummary: NoteSummary = new NoteSummary();
+  @Local recentNotes: NoteEntry[] = [];
+  @Local skinPickerVisible: boolean = false;
+  // App 级环境（系统深浅色 / 皮肤）：@ComponentV2 不支持 @StorageProp，改用 @ObservedV2 单例
+  @Local env: AppEnv = AppEnvStore.get();
+  @Monitor('env.colorMode') onColorModeMonitor(): void {
+    this.onSystemColorModeChanged();
+  }
+
+  @Monitor('env.appSkin') onSkinMonitor(): void {
+    this.onAppSkinChanged();
+  }
+  @Local palette: ShelfThemeColors = ShelfTheme.light();
 
   private settingLabels: string[] = ['本地占用', '数据明细', '存储位置', '导出备份',
     '关于 ireader', '隐私说明', '清空阅读统计', 'App 主题'];
@@ -83,8 +93,8 @@ export struct ProfilePanel {
   }
 
   private applyPalette(): void {
-    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
-      this.appSkin);
+    const next = ShelfTheme.resolve(this.env.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
+      this.env.appSkin);
     if (next.key !== this.palette.key) {
       this.palette = next;
     }
@@ -141,7 +151,7 @@ export struct ProfilePanel {
 
   private refreshSettingValues(): void {
     this.settingValues = [this.storageText, this.shelfDetail, '应用沙箱', 'JSON 快照',
-      `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复', AppSkinMeta.label(this.appSkin)];
+      `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复', AppSkinMeta.label(this.env.appSkin)];
   }
 
   private loadContinue(books: BookMeta[]): void {
@@ -849,9 +859,9 @@ export struct ProfilePanel {
                   .width(44)
                   .height(44)
                   .fill(AppSkinMeta.swatch(skin))
-                  .stroke(this.appSkin === skin ? this.palette.accentText : this.palette.border)
-                  .strokeWidth(this.appSkin === skin ? 3 : 1)
-                if (this.appSkin === skin) {
+                  .stroke(this.env.appSkin === skin ? this.palette.accentText : this.palette.border)
+                  .strokeWidth(this.env.appSkin === skin ? 3 : 1)
+                if (this.env.appSkin === skin) {
                   Text('✓')
                     .fontSize(18)
                     .fontColor(this.palette.accentText)
@@ -862,7 +872,7 @@ export struct ProfilePanel {
 
               Text(AppSkinMeta.label(skin))
                 .fontSize(12)
-                .fontColor(this.appSkin === skin ? this.palette.accent : this.palette.subText)
+                .fontColor(this.env.appSkin === skin ? this.palette.accent : this.palette.subText)
                 .margin({ top: 8 })
             }
             .layoutWeight(1)

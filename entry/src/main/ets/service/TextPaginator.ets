@@ -1,4 +1,5 @@
 import { display, MeasureOptions, MeasureUtils, UIContext } from '@kit.ArkUI';
+import { LayoutConfig } from '../reader/LayoutConfig';
 
 export class PageRange {
   start: number = 0;
@@ -64,18 +65,17 @@ export class PaginationSession {
   private finished: boolean = false;
   private pages: PaginationResult = new PaginationResult();
 
-  constructor(text: string, widthVp: number, fontSize: number, lineHeightVp: number,
-    pageHeightPx: number, firstPageHeightPx: number, utils: MeasureUtils | undefined,
-    metrics: PaginationMetrics, fontFamily: string = '') {
+  constructor(text: string, config: LayoutConfig, pageHeightPx: number, firstPageHeightPx: number,
+    utils: MeasureUtils | undefined, metrics: PaginationMetrics) {
     this.text = text;
-    this.widthVp = widthVp;
-    this.fontSize = fontSize;
-    this.lineHeightVp = lineHeightVp;
+    this.widthVp = config.width;
+    this.fontSize = config.fontSize;
+    this.lineHeightVp = config.lineHeight;
+    this.fontFamily = config.fontFamily;
     this.pageHeightPx = pageHeightPx > 0 ? pageHeightPx : 1;
     this.firstPageHeightPx = firstPageHeightPx > 0 ? firstPageHeightPx : 1;
     this.utils = utils;
     this.metrics = metrics;
-    this.fontFamily = fontFamily;
   }
 
   isFinished(): boolean {
@@ -210,12 +210,13 @@ export class TextPaginator {
    * 创建增量分页游标。所有排版参数在创建时标定一次，之后 step() 只做模型推算 + 单页实测。
    * @param firstPageExtraHeight 首页被标题等元素占用的高度（vp），仅首页扣减
    */
-  static createSession(ui: UIContext, text: string, widthVp: number, heightVp: number,
-    fontSize: number, lineHeightVp: number, firstPageExtraHeight: number = 0,
-    fontFamily: string = ''): PaginationSession {
-    const safeWidth = Math.max(1, widthVp);
-    const safeHeight = Math.max(1, heightVp);
-    const extra = firstPageExtraHeight > 0 ? firstPageExtraHeight : 0;
+  static createSession(ui: UIContext, text: string, config: LayoutConfig): PaginationSession {
+    const safeWidth = Math.max(1, config.width);
+    const safeHeight = Math.max(1, config.height);
+    const fontSize = config.fontSize;
+    const lineHeightVp = config.lineHeight;
+    const fontFamily = config.fontFamily;
+    const extra = config.firstPageExtraHeight > 0 ? config.firstPageExtraHeight : 0;
     let density = 1;
     try {
       density = display.getDefaultDisplaySync().densityPixels;
@@ -247,15 +248,12 @@ export class TextPaginator {
     }
     const pageHeightPx = safeHeight * density;
     const firstHeightPx = Math.max(1, safeHeight - extra) * density;
-    return new PaginationSession(text, safeWidth, fontSize, lineHeightVp, pageHeightPx,
-      firstHeightPx, utils, metrics, fontFamily);
+    return new PaginationSession(text, config, pageHeightPx, firstHeightPx, utils, metrics);
   }
 
   /** 一次性跑完分页（保持旧接口，供不需要分片的调用方使用） */
-  static paginate(ui: UIContext, text: string, widthVp: number, heightVp: number,
-    fontSize: number, lineHeight: number, firstPageExtraHeight: number = 0): PaginationResult {
-    const session = TextPaginator.createSession(ui, text, widthVp, heightVp, fontSize, lineHeight,
-      firstPageExtraHeight);
+  static paginate(ui: UIContext, text: string, config: LayoutConfig): PaginationResult {
+    const session = TextPaginator.createSession(ui, text, config);
     let guard = 0;
     while (!session.isFinished() && guard < MAX_PAGE_GUARD) {
       guard++;

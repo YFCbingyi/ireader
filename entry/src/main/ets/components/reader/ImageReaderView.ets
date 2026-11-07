@@ -153,47 +153,56 @@ class ImageBlockSource implements IDataSource {
   }
 }
 
-@Component
+@ComponentV2
 export struct ImageReaderView {
   // 左右模式：当前章图片（连续卷轴不使用）
-  @Prop images: ImageEntry[] = [];
-  @Prop startIndex: number = 0;
-  @Prop startRatio: number = 0;
-  @Prop @Watch('onReload') loadVersion: number = 0;
+  @Param images: ImageEntry[] = [];
+  @Param startIndex: number = 0;
+  @Param startRatio: number = 0;
+  @Param loadVersion: number = 0;
+  @Monitor('loadVersion') onLoadVersionWatch(): void {
+    this.onReload();
+  }
 
-  @Prop @Watch('onConfigChanged') mode: ReadingMode = ReadingMode.VERTICAL;
-  @Prop pageTurn: PageTurnMode = PageTurnMode.SLIDE;
-  @Prop chapterCount: number = 0;
+  @Param mode: ReadingMode = ReadingMode.VERTICAL;
+  @Monitor('mode') onModeWatch(): void {
+    this.onConfigChanged();
+  }
+  @Param pageTurn: PageTurnMode = PageTurnMode.SLIDE;
+  @Param chapterCount: number = 0;
   // 控制栏显示时锁定翻页、滑动与缩放，避免误触
-  @Prop controlsVisible: boolean = false;
+  @Param controlsVisible: boolean = false;
 
   // 竖排连续卷轴：跳转目标（初始 / 目录 / 书签），jumpVersion 变化时重建窗口并定位
-  @Prop @Watch('onJump') jumpVersion: number = 0;
-  @Prop jumpChapter: number = 0;
-  @Prop jumpIndex: number = 0;
-  @Prop jumpRatio: number = 0;
+  @Param jumpVersion: number = 0;
+  @Monitor('jumpVersion') onJumpVersionWatch(): void {
+    this.onJump();
+  }
+  @Param jumpChapter: number = 0;
+  @Param jumpIndex: number = 0;
+  @Param jumpRatio: number = 0;
 
   // 按章取标题 / 图片（图片已在 manifest 内存中，同步返回）
-  chapterTitleOf: (index: number) => string = (index: number): string => '';
-  chapterImagesOf: (index: number) => ImageEntry[] = (index: number): ImageEntry[] => [];
+  @Event chapterTitleOf: (index: number) => string = (index: number): string => '';
+  @Event chapterImagesOf: (index: number) => ImageEntry[] = (index: number): ImageEntry[] => [];
 
-  onProgress: (chapterIndex: number, imageIndex: number, intraRatio: number) => void =
+  @Event onProgress: (chapterIndex: number, imageIndex: number, intraRatio: number) => void =
     (chapterIndex: number, imageIndex: number, intraRatio: number): void => {};
-  onTap: () => void = (): void => {};
+  @Event onTap: () => void = (): void => {};
   // 定位动作完成后回调，父组件据此揭开翻章遮挡
-  onReady: () => void = (): void => {};
+  @Event onReady: () => void = (): void => {};
 
-  @State flowScale: number = 1;
-  @State viewWidth: number = 0;
-  @State viewHeight: number = 0;
-  @State contentWidth: number = 1;
-  @State hOffset: number = 0;
-  @State currentIndex: number = 0;
-  @State swipeIndex: number = 0;
+  @Local flowScale: number = 1;
+  @Local viewWidth: number = 0;
+  @Local viewHeight: number = 0;
+  @Local contentWidth: number = 1;
+  @Local hOffset: number = 0;
+  @Local currentIndex: number = 0;
+  @Local swipeIndex: number = 0;
   // 左右模式页眉显示的章名（随页所属章更新）
-  @State pagedChapterTitle: string = '';
-  @State scaleHintVisible: boolean = false;
-  @State scaleHintText: string = '';
+  @Local pagedChapterTitle: string = '';
+  @Local scaleHintVisible: boolean = false;
+  @Local scaleHintText: string = '';
 
   // 竖排连续滚动：可见章与图片序号
   private currentChapter: number = 0;
@@ -265,7 +274,7 @@ export struct ImageReaderView {
     if (this.mode !== ReadingMode.HORIZONTAL) {
       return;
     }
-    // 延迟一帧，确保同一批下发的 jumpChapter / startIndex 等 @Prop 已全部更新
+    // 延迟一帧，确保同一批下发的 jumpChapter / startIndex 等 @Param 已全部更新
     setTimeout(() => {
       this.reloadAt(this.jumpChapter, this.startIndex, this.startRatio);
     }, 0);
@@ -290,7 +299,7 @@ export struct ImageReaderView {
     if (this.mode !== ReadingMode.VERTICAL) {
       return;
     }
-    // 延迟一帧再读目标，确保 jumpChapter / jumpIndex / jumpRatio 等 @Prop 已更新到位
+    // 延迟一帧再读目标，确保 jumpChapter / jumpIndex / jumpRatio 等 @Param 已更新到位
     setTimeout(() => {
       this.initWindow(this.jumpChapter, this.jumpIndex, this.jumpRatio);
     }, 0);

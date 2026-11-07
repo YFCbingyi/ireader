@@ -1,3 +1,4 @@
+import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { curves, window } from '@kit.ArkUI';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
@@ -68,83 +69,88 @@ class BuiltinFontState {
 }
 
 @Entry
-@Component
+@ComponentV2
 struct Reader {
-  @State book: BookMeta = new BookMeta();
-  @State manifest: BookManifest = new BookManifest();
+  @Local book: BookMeta = new BookMeta();
+  @Local manifest: BookManifest = new BookManifest();
   // 与 manifest.chapters 同引用：@Link 只能用状态变量初始化，供面板按引用读取目录（避免整表深拷贝）
-  @State chapterList: ChapterMeta[] = [];
-  @State settings: ReaderSettings = new ReaderSettings();
-  @State bookmarks: Bookmark[] = [];
-  @State chapterIndex: number = 0;
-  @State chapterTitle: string = '';
-  @State chapterContent: string = '';
-  @State chapterImages: ImageEntry[] = [];
-  @State readingMode: ReadingMode = ReadingMode.VERTICAL;
-  @State pageTurn: PageTurnMode = PageTurnMode.VERTICAL;
-  @State fontSize: number = 18;
-  @State lineHeightRatio: number = 1.7;
-  @State fontFamily: string = '';
-  @State textAlignMode: TextAlignMode = TextAlignMode.AUTO;
+  @Local chapterList: ChapterMeta[] = [];
+  @Local settings: ReaderSettings = new ReaderSettings();
+  @Local bookmarks: Bookmark[] = [];
+  @Local chapterIndex: number = 0;
+  @Local chapterTitle: string = '';
+  @Local chapterContent: string = '';
+  @Local chapterImages: ImageEntry[] = [];
+  @Local readingMode: ReadingMode = ReadingMode.VERTICAL;
+  @Local pageTurn: PageTurnMode = PageTurnMode.VERTICAL;
+  @Local fontSize: number = 18;
+  @Local lineHeightRatio: number = 1.7;
+  @Local fontFamily: string = '';
+  @Local textAlignMode: TextAlignMode = TextAlignMode.AUTO;
   // 系统字体列表：字体选择菜单用（首次打开时取一次）
-  @State fontList: string[] = [];
-  @State loading: boolean = true;
-  @State errorText: string = '';
-  @State controlsVisible: boolean = false;
+  @Local fontList: string[] = [];
+  @Local loading: boolean = true;
+  @Local errorText: string = '';
+  @Local controlsVisible: boolean = false;
   // 翻章/跳转期间的纯色遮挡：盖住数据源重建与定位之间的空白帧，避免闪烁
-  @State turnMaskVisible: boolean = false;
+  @Local turnMaskVisible: boolean = false;
   // 竖排连续卷轴的跳转目标（初始打开 / 目录 / 书签），jumpVersion 变化触发子组件重建窗口
-  @State jumpVersion: number = 0;
-  @State jumpChapter: number = 0;
-  @State jumpOffset: number = 0;
-  @State jumpIndex: number = 0;
-  @State jumpRatio: number = 0;
-  @State panel: string = '';
-  @State loadVersion: number = 0;
-  @State startCharOffset: number = 0;
-  @State startImageIndex: number = 0;
-  @State startImageRatio: number = 0;
-  @State progressLabel: string = '';
-  @State bookmarked: boolean = false;
+  @Local jumpVersion: number = 0;
+  @Local jumpChapter: number = 0;
+  @Local jumpOffset: number = 0;
+  @Local jumpIndex: number = 0;
+  @Local jumpRatio: number = 0;
+  @Local panel: string = '';
+  @Local loadVersion: number = 0;
+  @Local startCharOffset: number = 0;
+  @Local startImageIndex: number = 0;
+  @Local startImageRatio: number = 0;
+  @Local progressLabel: string = '';
+  @Local bookmarked: boolean = false;
   // 下拉书签：当前下拉位移、是否越过阈值（两者驱动顶部角标与提示文案）
-  @State pullOffset: number = 0;
-  @State pullReached: boolean = false;
+  @Local pullOffset: number = 0;
+  @Local pullReached: boolean = false;
   private pullTracking: boolean = false;
   private pullStartX: number = 0;
   private pullStartY: number = 0;
-  @State theme: ReadingTheme = ReadingTheme.EYE;
-  @State palette: ReaderThemeColors = ReaderTheme.eye();
+  @Local theme: ReadingTheme = ReadingTheme.EYE;
+  @Local palette: ReaderThemeColors = ReaderTheme.eye();
   // 图片书面板专用深色色板：只建一次，避免每次渲染都给子组件传新对象导致整面板重建
   private imagePalette: ReaderThemeColors = ReaderTheme.dark();
   // 顶部设置按钮的下拉菜单：阅读设置 / 添加书签 / 全文搜索
-  @State menuVisible: boolean = false;
+  @Local menuVisible: boolean = false;
   // 阅读设置：页脚左侧时间电量
-  @State showFooterTime: boolean = true;
+  @Local showFooterTime: boolean = true;
   // 全文搜索：关键字、进行中状态与进度、结果、逐书历史
-  @State searchKeyword: string = '';
-  @State searchRunning: boolean = false;
-  @State searchProgress: string = '';
-  @State searchResults: SearchHit[] = [];
-  @State searchHistory: string[] = [];
+  @Local searchKeyword: string = '';
+  @Local searchRunning: boolean = false;
+  @Local searchProgress: string = '';
+  @Local searchResults: SearchHit[] = [];
+  @Local searchHistory: string[] = [];
   private searchSeq: number = 0;
   // 划线 / 想法
-  @State annotations: Annotation[] = [];
-  @State annotationsVersion: number = 0;
-  @State noteVisible: boolean = false;
-  @State noteDraft: string = '';
-  @State noteQuote: string = '';
-  @State noteExistingId: string = '';
+  @Local annotations: Annotation[] = [];
+  @Local annotationsVersion: number = 0;
+  @Local noteVisible: boolean = false;
+  @Local noteDraft: string = '';
+  @Local noteQuote: string = '';
+  @Local noteExistingId: string = '';
   // 词典卡片：先展示选中的词，由用户决定复制还是去浏览器查
-  @State dictVisible: boolean = false;
-  @State dictWord: string = '';
+  @Local dictVisible: boolean = false;
+  @Local dictWord: string = '';
   private noteChapter: number = 0;
   private noteStart: number = 0;
   private noteEnd: number = 0;
   private annotationIndex: Map<number, Annotation[]> = new Map();
-  @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
-    ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
+  // App 级环境（系统深浅色 / 前后台）：@ComponentV2 不支持 @StorageProp，改用 @ObservedV2 单例
+  @Local env: AppEnv = AppEnvStore.get();
+  @Monitor('env.colorMode') onColorModeMonitor(): void {
+    this.onSystemColorModeChanged();
+  }
 
-  @StorageProp('appActive') @Watch('onAppActiveChanged') appActive: boolean = true;
+  @Monitor('env.appActive') onAppActiveMonitor(): void {
+    this.onAppActiveChanged();
+  }
 
   private bookId: string = '';
   private progressChapter: number = 0;
@@ -225,9 +231,15 @@ struct Reader {
     if (savedChapter >= this.manifest.chapters.length) {
       savedChapter = this.manifest.chapters.length - 1;
     }
+    // 文本书的进度锚点只有「章 + 字符偏移」：页码与滚动比例是排版派生值，
+    // 字号 / 行距一变就失效，读回来只会落到错位的位置
     let savedOffset = this.book.progress.charOffset;
-    let savedPageIndex = this.book.progress.pageIndex;
-    let savedRatio = this.book.progress.scrollRatio;
+    let savedPageIndex = 0;
+    let savedRatio = 0;
+    if (this.book.type !== BookType.TEXT) {
+      savedPageIndex = this.book.progress.pageIndex;
+      savedRatio = this.book.progress.scrollRatio;
+    }
     // 从「我的」页点最近笔记进入时，覆盖上次进度，直接落到划线所在位置
     if (jumpChapter >= 0 && jumpChapter < this.manifest.chapters.length) {
       savedChapter = jumpChapter;
@@ -389,7 +401,7 @@ struct Reader {
   }
 
   private onAppActiveChanged(): void {
-    if (this.appActive) {
+    if (this.env.appActive) {
       this.startReadingSession();
     } else {
       this.stopReadingSession();
@@ -683,8 +695,14 @@ struct Reader {
     }
     this.book.progress.chapterIndex = this.progressChapter;
     this.book.progress.charOffset = this.progressCharOffset;
-    this.book.progress.pageIndex = this.progressPageIndex;
-    this.book.progress.scrollRatio = this.progressRatio;
+    if (this.book.type === BookType.TEXT) {
+      // 文本进度不落盘页码 / 滚动比例（派生值），保证换字号重排后进度仍然准确
+      this.book.progress.pageIndex = 0;
+      this.book.progress.scrollRatio = 0;
+    } else {
+      this.book.progress.pageIndex = this.progressPageIndex;
+      this.book.progress.scrollRatio = this.progressRatio;
+    }
     this.book.progress.percent = this.computePercent();
     this.book.progress.updatedAt = Date.now();
     this.book.updatedAt = Date.now();
@@ -958,8 +976,9 @@ struct Reader {
     }
     const bookmark = Bookmark.of(this.bookId, this.chapterIndex, chapter.title);
     bookmark.charOffset = this.progressCharOffset;
-    bookmark.pageIndex = this.progressPageIndex;
-    bookmark.scrollRatio = this.progressRatio;
+    // 文本书签同样只用字符偏移定位，页码与比例仅图片书有意义
+    bookmark.pageIndex = this.book.type === BookType.TEXT ? 0 : this.progressPageIndex;
+    bookmark.scrollRatio = this.book.type === BookType.TEXT ? 0 : this.progressRatio;
     bookmark.preview = this.makePreview(chapter);
     this.bookmarks.splice(0, 0, bookmark);
     if (this.bookmarks.length > 200) {
@@ -1160,7 +1179,8 @@ struct Reader {
     this.readingMode = mode === PageTurnMode.VERTICAL ? ReadingMode.VERTICAL : ReadingMode.HORIZONTAL;
     if (previousMode !== this.readingMode) {
       // 用当前进度章重新打开，保证方向切换后定位一致
-      this.openChapter(this.progressChapter, this.progressCharOffset, 0, this.progressRatio, false);
+      this.openChapter(this.progressChapter, this.progressCharOffset, 0,
+        this.book.type === BookType.TEXT ? 0 : this.progressRatio, false);
     }
   }
 
@@ -1401,7 +1421,7 @@ struct Reader {
   }
 
   private isSystemDark(): boolean {
-    return this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+    return this.env.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
   }
 
   private applyTheme(): void {
@@ -2021,7 +2041,7 @@ struct Reader {
         ReaderPanels({
           panel: this.panel,
           bookTitle: this.book.title,
-          chapters: $chapterList,
+          chapters: this.chapterList,
           currentChapter: this.chapterIndex,
           currentOffset: this.progressCharOffset,
           bookmarks: this.bookmarks,

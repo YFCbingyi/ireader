@@ -52,11 +52,19 @@ export function textAlignLabel(mode: TextAlignMode): string {
   return '自动对齐';
 }
 
+/**
+ * 阅读进度。
+ *
+ * 文本书的唯一锚点是 chapterIndex + charOffset（页码 / 滚动比例都是排版派生值，
+ * 换字号后失效，不再落盘）；图片书没有字符偏移，用 chapterIndex + pageIndex + scrollRatio。
+ */
 export class ReadingProgress {
   chapterIndex: number = 0;
   charOffset: number = 0;
+  // 仅图片书使用：章内图片序号与章内比例
   pageIndex: number = 0;
   scrollRatio: number = 0;
+  // 全书百分比（按章等权，书架卡片展示用）
   percent: number = 0;
   updatedAt: number = 0;
 }

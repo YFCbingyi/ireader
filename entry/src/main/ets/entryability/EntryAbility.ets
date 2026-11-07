@@ -17,6 +17,7 @@ import { AbilityConstant, Configuration, ConfigurationConstant, UIAbility, Want 
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
+import { AppEnvStore } from '../model/AppEnv';
 
 const DOMAIN = 0x0000;
 
@@ -27,13 +28,13 @@ export default class EntryAbility extends UIAbility {
     } catch (err) {
       hilog.error(DOMAIN, 'testTag', 'Failed to set colorMode. Cause: %{public}s', JSON.stringify(err));
     }
-    AppStorage.setOrCreate<number>('systemColorMode', this.currentColorMode());
-    AppStorage.setOrCreate<boolean>('appActive', true);
+    AppEnvStore.get().colorMode = this.currentColorMode();
+    AppEnvStore.get().appActive = true;
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
   }
 
   onConfigurationUpdate(newConfig: Configuration): void {
-    AppStorage.setOrCreate<number>('systemColorMode', EntryAbility.normalizeColorMode(newConfig.colorMode));
+    AppEnvStore.get().colorMode = EntryAbility.normalizeColorMode(newConfig.colorMode);
   }
 
   private currentColorMode(): number {
@@ -91,13 +92,13 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     // Ability has brought to foreground
-    AppStorage.setOrCreate<boolean>('appActive', true);
+    AppEnvStore.get().appActive = true;
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onForeground');
   }
 
   onBackground(): void {
     // Ability has back to background
-    AppStorage.setOrCreate<boolean>('appActive', false);
+    AppEnvStore.get().appActive = false;
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
   }
 }

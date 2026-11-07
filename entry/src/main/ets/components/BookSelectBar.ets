@@ -1,3 +1,4 @@
+import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { ConfigurationConstant } from '@kit.AbilityKit';
 import { AppSkin, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
 
@@ -5,31 +6,37 @@ import { AppSkin, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
  * 多选状态栏：书架页与分组页共用。
  * 中间的动作按钮文案由调用方注入（书架「分组至」/ 分组页「移出分组」），其余交互完全一致。
  */
-@Component
+@ComponentV2
 export struct BookSelectBar {
-  @Prop selectedCount: number = 0;
-  @Prop allSelected: boolean = false;
-  @Prop actionLabel: string = '';
-  onCancel: () => void = (): void => {
+  @Param selectedCount: number = 0;
+  @Param allSelected: boolean = false;
+  @Param actionLabel: string = '';
+  @Event onCancel: () => void = (): void => {
   };
-  onToggleAll: () => void = (): void => {
+  @Event onToggleAll: () => void = (): void => {
   };
-  onAction: () => void = (): void => {
+  @Event onAction: () => void = (): void => {
   };
-  onDelete: () => void = (): void => {
+  @Event onDelete: () => void = (): void => {
   };
-  @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
-    ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
-  @StorageProp('appSkin') @Watch('onAppSkinChanged') appSkin: string = AppSkin.GOLD;
-  @State palette: ShelfThemeColors = ShelfTheme.light();
+  // App 级环境（系统深浅色 / 皮肤）：@ComponentV2 不支持 @StorageProp，改用 @ObservedV2 单例
+  @Local env: AppEnv = AppEnvStore.get();
+  @Monitor('env.colorMode') onColorModeMonitor(): void {
+    this.onSystemColorModeChanged();
+  }
+
+  @Monitor('env.appSkin') onSkinMonitor(): void {
+    this.onAppSkinChanged();
+  }
+  @Local palette: ShelfThemeColors = ShelfTheme.light();
 
   aboutToAppear(): void {
     this.applyPalette();
   }
 
   private applyPalette(): void {
-    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
-      this.appSkin);
+    const next = ShelfTheme.resolve(this.env.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
+      this.env.appSkin);
     if (next.key !== this.palette.key) {
       this.palette = next;
     }
