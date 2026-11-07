@@ -1,8 +1,14 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { batteryInfo } from '@kit.BasicServicesKit';
+import { image } from '@kit.ImageKit';
 import { PageTurnMode, ReadingMode, TextAlignMode } from '../../model/BookModels';
 import { Annotation, SegmentBuilder, TextSegment } from '../../model/Annotation';
 import { TextPaginator } from '../../service/TextPaginator';
+import { PagedItem, PageWindow } from '../../reader/PageWindow';
+import { BlockWindow, ReaderBlock } from '../../reader/BlockWindow';
+import { FlipEnd, FlipStateMachine, FlipUpdate } from '../../reader/FlipStateMachine';
+import { LayoutConfig } from '../../reader/LayoutConfig';
+import { FlipOverlay } from './FlipOverlay';
 
 const DOMAIN = 0x0006;
 const TAG = 'TextReaderView';
@@ -18,10 +24,6 @@ const FOOTER_TEXT_SIZE = 11;
 // 章标题：正文 * 1.25 加粗，下方留白
 const TITLE_SCALE = 1.25;
 const TITLE_GAP = 16;
-// 竖排正文分块：每块约 600 字，滚动时只渲染可视区附近的块
-const CHUNK_CHARS = 600;
-const CHUNK_NEWLINE_SLACK = 160;
-const PAGE_CACHE_LIMIT = 6;
 // 左右分页：距端部不足 2 页时补章；窗口章数上限
 const PAGE_WINDOW_MAX_CHAPTERS = 5;
 const PAGE_LOAD_AHEAD = 2;
@@ -48,362 +50,22 @@ const LOAD_AHEAD_BLOCKS = 12;
 const MENU_HIGHLIGHT = 'ireader_highlight';
 const MENU_NOTE = 'ireader_note';
 const MENU_DICT = 'ireader_dict';
+// 回弹 / 补间时长（ms）
+const FLIP_SETTLE_DURATION = 260;
+// 点击翻页的整页卷曲时长（ms）
+const FLIP_AUTO_DURATION = 380;
 
-/** 左右分页的一页：带所属章与章内字符偏移，key 跨章唯一 */
-class PagedItem {
-  key: string = '';
-  chapter: number = 0;
-  pageIndex: number = 0;
-  text: string = '';
-  start: number = 0;
-
-  static of(chapter: number, pageIndex: number, text: string, start: number): PagedItem {
-    const item = new PagedItem();
-    item.key = `${chapter}_${pageIndex}`;
-    item.chapter = chapter;
-    item.pageIndex = pageIndex;
-    item.text = text;
-    item.start = start;
-    return item;
-  }
-}
-
-/** 章节页缓存：排版参数变化时整条失效 */
-class PagedChapter {
-  key: string = '';
-  items: PagedItem[] = [];
-
-  static of(key: string, items: PagedItem[]): PagedChapter {
-    const chapter = new PagedChapter();
-    chapter.key = key;
-    chapter.items = items;
-    return chapter;
-  }
-}
-
-/**
- * 跨章页数据源：支持整表重置，以及尾部追加章、头部前插章、两章端回收。
- * 前插会让既有页索引整体后移，调用方必须做索引补偿。
- */
-class PagedSource implements IDataSource {
-  private items: PagedItem[] = [];
-  private listeners: DataChangeListener[] = [];
-
-  totalCount(): number {
-    return this.items.length;
-  }
-
-  getData(index: number): PagedItem {
-    const item = this.items[index];
-    return item !== undefined ? item : PagedItem.of(0, 0, '', 0);
-  }
-
-  registerDataChangeListener(listener: DataChangeListener): void {
-    if (this.listeners.indexOf(listener) < 0) {
-      this.listeners.push(listener);
-    }
-  }
-
-  unregisterDataChangeListener(listener: DataChangeListener): void {
-    const index = this.listeners.indexOf(listener);
-    if (index >= 0) {
-      this.listeners.splice(index, 1);
-    }
-  }
-
-  itemAt(index: number): PagedItem | undefined {
-    return this.items[index];
-  }
-
-  reset(newItems: PagedItem[]): void {
-    this.items = newItems;
-    for (let i = 0; i < this.listeners.length; i++) {
-      this.listeners[i].onDataReloaded();
-    }
-  }
-
-  /** 尾部追加一章的页：不影响既有索引 */
-  appendChapter(newItems: PagedItem[]): void {
-    if (newItems.length === 0) {
-      return;
-    }
-    const startIndex = this.items.length;
-    for (let i = 0; i < newItems.length; i++) {
-      this.items.push(newItems[i]);
-    }
-    for (let i = 0; i < this.listeners.length; i++) {
-      const listener = this.listeners[i];
-      for (let j = 0; j < newItems.length; j++) {
-        listener.onDataAdd(startIndex + j);
-      }
-    }
-  }
-
-  /** 头部前插一章的页：既有页索引整体后移 newItems.length */
-  prependChapter(newItems: PagedItem[]): void {
-    if (newItems.length === 0) {
-      return;
-    }
-    const combined: PagedItem[] = [];
-    for (let i = 0; i < newItems.length; i++) {
-      combined.push(newItems[i]);
-    }
-    for (let i = 0; i < this.items.length; i++) {
-      combined.push(this.items[i]);
-    }
-    this.items = combined;
-    for (let i = 0; i < this.listeners.length; i++) {
-      const listener = this.listeners[i];
-      for (let j = 0; j < newItems.length; j++) {
-        listener.onDataAdd(j);
-      }
-    }
-  }
-
-  chapterCountOf(chapter: number): number {
-    let count = 0;
-    for (let i = 0; i < this.items.length; i++) {
-      if (this.items[i].chapter === chapter) {
-        count++;
-      }
-    }
-    return count;
-  }
-
-  /** 移除整个头部的某一章，返回被移除的页数 */
-  removeHeadChapter(chapter: number): number {
-    const count = this.chapterCountOf(chapter);
-    if (count <= 0) {
-      return 0;
-    }
-    this.items.splice(0, count);
-    for (let i = 0; i < this.listeners.length; i++) {
-      const listener = this.listeners[i];
-      for (let j = 0; j < count; j++) {
-        listener.onDataDelete(0);
-      }
-    }
-    return count;
-  }
-
-  /** 移除整个尾部的某一章，返回被移除的页数 */
-  removeTailChapter(chapter: number): number {
-    const count = this.chapterCountOf(chapter);
-    if (count <= 0) {
-      return 0;
-    }
-    const startIndex = this.items.length - count;
-    this.items.splice(startIndex, count);
-    for (let i = 0; i < this.listeners.length; i++) {
-      const listener = this.listeners[i];
-      for (let j = 0; j < count; j++) {
-        listener.onDataDelete(startIndex);
-      }
-    }
-    return count;
-  }
-
-  /** 通知区间内的页内容变了（划线刷新），只重建这些项 */
-  refreshRange(from: number, to: number): void {
-    const total = this.items.length;
-    if (total === 0) {
-      return;
-    }
-    const start = from < 0 ? 0 : from;
-    const end = to >= total ? total - 1 : to;
-    for (let i = start; i <= end; i++) {
-      for (let j = 0; j < this.listeners.length; j++) {
-        this.listeners[j].onDataChange(i);
-      }
-    }
-  }
-
-  /** 某章在当前窗口内的起始页索引，不存在返回 -1 */
-  chapterStartIndex(chapter: number): number {
-    for (let i = 0; i < this.items.length; i++) {
-      if (this.items[i].chapter === chapter) {
-        return i;
-      }
-    }
-    return -1;
-  }
-}
-
-/** 连续卷轴的文本块：章标题 / 正文分块，带所属章节号 */
-class ReaderBlock {
-  kind: string = '';
-  text: string = '';
-  chapterIndex: number = 0;
-  start: number = 0;
-  end: number = 0;
-
-  static of(kind: string, text: string, chapterIndex: number, start: number, end: number): ReaderBlock {
-    const block = new ReaderBlock();
-    block.kind = kind;
-    block.text = text;
-    block.chapterIndex = chapterIndex;
-    block.start = start;
-    block.end = end;
-    return block;
-  }
-}
-
-/** 跨章块数据源：支持整表重置，以及尾部追加 / 头部前插 / 两端回收的增量通知 */
-class ReaderBlockSource implements IDataSource {
-  private blocks: ReaderBlock[] = [];
-  private listeners: DataChangeListener[] = [];
-
-  totalCount(): number {
-    return this.blocks.length;
-  }
-
-  getData(index: number): ReaderBlock {
-    const block = this.blocks[index];
-    return block !== undefined ? block : ReaderBlock.of('text', '', 0, 0, 0);
-  }
-
-  /** 可见区间内是否包含某类块（竖排用来判断章标题是否在屏幕上） */
-  hasKindBetween(start: number, end: number, kind: string): boolean {
-    if (this.blocks.length === 0) {
-      return false;
-    }
-    const from = Math.max(0, start);
-    const to = Math.min(this.blocks.length - 1, end);
-    for (let i = from; i <= to; i++) {
-      if (this.blocks[i].kind === kind) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  registerDataChangeListener(listener: DataChangeListener): void {
-    if (this.listeners.indexOf(listener) < 0) {
-      this.listeners.push(listener);
-    }
-  }
-
-  unregisterDataChangeListener(listener: DataChangeListener): void {
-    const index = this.listeners.indexOf(listener);
-    if (index >= 0) {
-      this.listeners.splice(index, 1);
-    }
-  }
-
-  /** 内部块数组只读视图，供组件计算锚点与进度 */
-  snapshot(): ReaderBlock[] {
-    return this.blocks;
-  }
-
-  reset(blocks: ReaderBlock[]): void {
-    this.blocks = blocks;
-    for (let i = 0; i < this.listeners.length; i++) {
-      this.listeners[i].onDataReloaded();
-    }
-  }
-
-  /** 尾部追加若干块 */
-  append(newBlocks: ReaderBlock[]): void {
-    if (newBlocks.length === 0) {
-      return;
-    }
-    const startIndex = this.blocks.length;
-    for (let i = 0; i < newBlocks.length; i++) {
-      this.blocks.push(newBlocks[i]);
-    }
-    for (let i = 0; i < this.listeners.length; i++) {
-      const listener = this.listeners[i];
-      for (let j = 0; j < newBlocks.length; j++) {
-        listener.onDataAdd(startIndex + j);
-      }
-    }
-  }
-
-  /** 头部前插若干块（调用方需自行做滚动位置补偿） */
-  prepend(newBlocks: ReaderBlock[]): void {
-    if (newBlocks.length === 0) {
-      return;
-    }
-    const combined: ReaderBlock[] = [];
-    for (let i = 0; i < newBlocks.length; i++) {
-      combined.push(newBlocks[i]);
-    }
-    for (let i = 0; i < this.blocks.length; i++) {
-      combined.push(this.blocks[i]);
-    }
-    this.blocks = combined;
-    for (let i = 0; i < this.listeners.length; i++) {
-      const listener = this.listeners[i];
-      for (let j = 0; j < newBlocks.length; j++) {
-        listener.onDataAdd(j);
-      }
-    }
-  }
-
-  /** 从头部移除 count 块 */
-  removeHead(count: number): void {
-    if (count <= 0 || this.blocks.length === 0) {
-      return;
-    }
-    let removeCount = count;
-    if (removeCount > this.blocks.length) {
-      removeCount = this.blocks.length;
-    }
-    this.blocks.splice(0, removeCount);
-    for (let i = 0; i < this.listeners.length; i++) {
-      const listener = this.listeners[i];
-      for (let j = 0; j < removeCount; j++) {
-        listener.onDataDelete(0);
-      }
-    }
-  }
-
-  /** 通知区间内的块内容变了（划线刷新），只重建这些项 */
-  refreshRange(from: number, to: number): void {
-    const total = this.blocks.length;
-    if (total === 0) {
-      return;
-    }
-    const start = from < 0 ? 0 : from;
-    const end = to >= total ? total - 1 : to;
-    for (let i = start; i <= end; i++) {
-      for (let j = 0; j < this.listeners.length; j++) {
-        this.listeners[j].onDataChange(i);
-      }
-    }
-  }
-
-  /** 从尾部移除 count 块 */
-  removeTail(count: number): void {
-    if (count <= 0 || this.blocks.length === 0) {
-      return;
-    }
-    let removeCount = count;
-    if (removeCount > this.blocks.length) {
-      removeCount = this.blocks.length;
-    }
-    const startIndex = this.blocks.length - removeCount;
-    this.blocks.splice(startIndex, removeCount);
-    for (let i = 0; i < this.listeners.length; i++) {
-      const listener = this.listeners[i];
-      for (let j = 0; j < removeCount; j++) {
-        listener.onDataDelete(startIndex);
-      }
-    }
-  }
-}
-
-@Component
+@ComponentV2
 struct ReaderFooter {
-  @Prop progressText: string = '';
+  @Param progressText: string = '';
   // 右侧章节进度：如 4/65章
-  @Prop chapterText: string = '';
-  @Prop badgeBg: string = '#00000000';
-  @Prop subTextColor: string = '#8C8C8C';
+  @Param chapterText: string = '';
+  @Param badgeBg: string = '#00000000';
+  @Param subTextColor: string = '#8C8C8C';
   // 页脚左侧时间与电量：由阅读设置控制，关闭时左侧留空
-  @Prop showClock: boolean = true;
-  @State clock: string = '';
-  @State battery: number = -1;
+  @Param showClock: boolean = true;
+  @Local clock: string = '';
+  @Local battery: number = -1;
 
   private timer: number = -1;
 
@@ -474,94 +136,103 @@ struct ReaderFooter {
   }
 }
 
-@Component
+@ComponentV2
 export struct TextReaderView {
   // 当前章正文：左右模式的书签预览与父组件文案仍使用；分页改由 chapterTextProvider 按章取文
-  @Prop content: string = '';
-  @Prop chapterTitle: string = '';
-  @Prop startCharOffset: number = 0;
-  @Prop @Watch('onReload') loadVersion: number = 0;
-  @Prop chapterIndex: number = 0;
+  @Param content: string = '';
+  @Param chapterTitle: string = '';
+  @Param startCharOffset: number = 0;
+  @Param loadVersion: number = 0;
+  @Monitor('loadVersion') onLoadVersionWatch(): void {
+    this.onReload();
+  }
+  @Param chapterIndex: number = 0;
 
-  @Prop @Watch('onModeChanged') mode: ReadingMode = ReadingMode.VERTICAL;
-  @Prop pageTurn: PageTurnMode = PageTurnMode.SLIDE;
-  @Prop @Watch('onConfigChanged') fontSize: number = 18;
-  @Prop @Watch('onConfigChanged') lineHeightRatio: number = 1.7;
-  @Prop @Watch('onConfigChanged') fontFamily: string = '';
-  @Prop textAlignMode: TextAlignMode = TextAlignMode.AUTO;
-  @Prop chapterCount: number = 0;
-  @Prop bgColor: string = '#F7F3E8';
-  @Prop textColor: string = '#2B2B2B';
-  @Prop subTextColor: string = '#8C8C8C';
-  @Prop dividerColor: string = '#EFE7D8';
-  @Prop accentColor: string = '#8B5E3C';
-  @Prop accentTextColor: string = '#FFF8ED';
+  @Param mode: ReadingMode = ReadingMode.VERTICAL;
+  @Monitor('mode') onModeWatch(): void {
+    this.onModeChanged();
+  }
+  @Param pageTurn: PageTurnMode = PageTurnMode.SLIDE;
+  @Param fontSize: number = 18;
+  @Monitor('fontSize') onFontSizeWatch(): void {
+    this.onConfigChanged();
+  }
+  @Param lineHeightRatio: number = 1.7;
+  @Monitor('lineHeightRatio') onLineHeightRatioWatch(): void {
+    this.onConfigChanged();
+  }
+  @Param fontFamily: string = '';
+  @Monitor('fontFamily') onFontFamilyWatch(): void {
+    this.onConfigChanged();
+  }
+  @Param textAlignMode: TextAlignMode = TextAlignMode.AUTO;
+  @Param chapterCount: number = 0;
+  @Param bgColor: string = '#F7F3E8';
+  @Param textColor: string = '#2B2B2B';
+  @Param subTextColor: string = '#8C8C8C';
+  @Param dividerColor: string = '#EFE7D8';
+  @Param accentColor: string = '#8B5E3C';
+  @Param accentTextColor: string = '#FFF8ED';
   // 页脚左侧显示时间与电量（阅读设置开关）
-  @Prop showFooterTime: boolean = true;
+  @Param showFooterTime: boolean = true;
   // 控制栏显示时锁定翻页与滑动，避免误触
-  @Prop controlsVisible: boolean = false;
+  @Param controlsVisible: boolean = false;
 
   // 划线 / 想法：按章取标注（父组件注入，内部按章分组缓存）；版本号变化时重建可见块刷新样式
-  @Prop @Watch('onAnnotationsChanged') annotationsVersion: number = 0;
-  @Prop annotationBg: string = '#40E8B339';
-  @Prop annotationLine: string = '#C08A22';
-  annotationsOf: (chapterIndex: number) => Annotation[] = (chapterIndex: number): Annotation[] => [];
-  onToggleHighlight: (chapter: number, start: number, end: number, text: string) => void =
+  @Param annotationsVersion: number = 0;
+  @Monitor('annotationsVersion') onAnnotationsVersionWatch(): void {
+    this.onAnnotationsChanged();
+  }
+  @Param annotationBg: string = '#40E8B339';
+  @Param annotationLine: string = '#C08A22';
+  @Event annotationsOf: (chapterIndex: number) => Annotation[] = (chapterIndex: number): Annotation[] => [];
+  @Event onToggleHighlight: (chapter: number, start: number, end: number, text: string) => void =
     (chapter: number, start: number, end: number, text: string): void => {};
-  onRequestNote: (chapter: number, start: number, end: number, text: string) => void =
+  @Event onRequestNote: (chapter: number, start: number, end: number, text: string) => void =
     (chapter: number, start: number, end: number, text: string): void => {};
-  onLookup: (word: string) => void = (word: string): void => {};
+  @Event onLookup: (word: string) => void = (word: string): void => {};
 
   // 竖排连续卷轴：跳转目标（初始打开 / 目录 / 书签共用），jumpVersion 变化时重建窗口并定位
-  @Prop @Watch('onJump') jumpVersion: number = 0;
-  @Prop jumpChapter: number = 0;
-  @Prop jumpOffset: number = 0;
+  @Param jumpVersion: number = 0;
+  @Monitor('jumpVersion') onJumpVersionWatch(): void {
+    this.onJump();
+  }
+  @Param jumpChapter: number = 0;
+  @Param jumpOffset: number = 0;
 
   // 按章取标题 / 取全文（父组件注入，复用其章节缓存与异步读盘）
-  chapterTitleOf: (index: number) => string = (index: number): string => '';
-  chapterTextProvider: (index: number) => Promise<string> =
+  @Event chapterTitleOf: (index: number) => string = (index: number): string => '';
+  @Event chapterTextProvider: (index: number) => Promise<string> =
     (index: number): Promise<string> => Promise.resolve('');
 
-  onProgress: (chapterIndex: number, charOffset: number, ratio: number) => void =
+  @Event onProgress: (chapterIndex: number, charOffset: number, ratio: number) => void =
     (chapterIndex: number, charOffset: number, ratio: number): void => {};
-  onTap: () => void = (): void => {};
+  @Event onTap: () => void = (): void => {};
   // 定位动作完成后回调，父组件据此揭开翻章遮挡
-  onReady: () => void = (): void => {};
+  @Event onReady: () => void = (): void => {};
 
   // 左右模式：当前页索引与当前页所属章（页眉、页脚、目录高亮都以此为准）
-  @State currentPage: number = 0;
-  @State pagedChapter: number = 0;
+  @Local currentPage: number = 0;
+  @Local pagedChapter: number = 0;
 
-  private pageSource: PagedSource = new PagedSource();
-  // 章级页缓存（章号 -> 该章页数组），排版参数变化时整条失效
-  private pageCache: Map<number, PagedChapter> = new Map();
-  private pageCacheKeys: number[] = [];
-  // 当前页窗口的章范围
-  private pageWindowStart: number = -1;
-  private pageWindowEnd: number = -1;
-  private loadingPageChapters: Set<number> = new Set();
+  // 页窗口（Engine 层）：页序列 + 章级缓存 + 章范围
+  private pageWindow: PageWindow = new PageWindow();
   // 页窗口重建序号，避免异步分页结果错位
   private pageSeq: number = 0;
   // 排版代次：字号 / 行距 / 视口尺寸变化时递增，用于作废进行中的增量分页
   private layoutEpoch: number = 0;
-  private chapterLengths: Map<number, number> = new Map();
   private pagedReady: boolean = false;
   // 数据源重建 / 索引补偿期间抑制 onChange 的进度误报（结构变化会让 Swiper 先跳到 0 或旧索引）
   private pageSyncLock: boolean = false;
   private pageSyncTimer: number = -1;
 
   // 连续卷轴：可见章号（页脚显示）
-  @State currentChapter: number = 0;
+  @Local currentChapter: number = 0;
   // 竖排：章标题块在屏幕内时收起顶部小标题，避免与大标题重复
-  @State headerSuppressed: boolean = false;
+  @Local headerSuppressed: boolean = false;
 
-  private blockSource: ReaderBlockSource = new ReaderBlockSource();
-  private windowStart: number = 0;
-  private windowEnd: number = -1;
-  // 窗口内各章全文与块数
-  private chapterTexts: Map<number, string> = new Map();
-  private chapterBlockCounts: Map<number, number> = new Map();
-  private loadingChapters: Set<number> = new Set();
+  // 块窗口（Engine 层）：块序列 + 章范围 + 章全文/块数
+  private blockWindow: BlockWindow = new BlockWindow();
   // 窗口初始化/跳转序号，避免异步加载结果错位
   private windowSeq: number = 0;
   private verticalReady: boolean = false;
@@ -584,7 +255,7 @@ export struct TextReaderView {
   private turnTargetPage: number = -1;
   private turnTargetAt: number = 0;
   // 触摸按下后的选区锁：锁定期内禁用文本选择（防双击选词），松手自解
-  @State selectionLocked: boolean = false;
+  @Local selectionLocked: boolean = false;
   private selectionUnlockTimer: number = -1;
   private restoreTimer: number = -1;
   private readyTimer: number = -1;
@@ -595,6 +266,19 @@ export struct TextReaderView {
   private swiperController: SwiperController = new SwiperController();
   // 一次性延时任务句柄：页面销毁时统一取消，避免回调操作已释放的 Scroller / SwiperController
   private pendingTimers: number[] = [];
+
+  // ===== 仿真翻页（卷曲）=====
+  // 进度与方向是视觉层的唯一输入；位图为空时视觉层整层不绘制，直接看真实页面
+  @Local flipProgress: number = 0;
+  @Local flipDirection: number = 1;
+  @Local flipPageImage: image.PixelMap | undefined = undefined;
+  @Local flipTargetImage: image.PixelMap | undefined = undefined;
+  // 手势状态机（Strategy 层）：只算方向与进度，不碰 UI
+  private flipMachine: FlipStateMachine = new FlipStateMachine();
+  // 补间动画进行中：期间拒绝新手势，避免两张位图交叉
+  private flipBusy: boolean = false;
+  // 目标页位图请求在途，防止每帧重复发起截图
+  private flipTargetPending: boolean = false;
 
   /** 登记一次性延时任务，便于销毁时取消（替代散落的裸 setTimeout） */
   private scheduleOnce(task: () => void, delay: number): void {
@@ -624,6 +308,8 @@ export struct TextReaderView {
 
   aboutToDisappear(): void {
     this.reportCurrent();
+    // 仿真翻页的位图必须显式释放，否则每翻几页就漏两张
+    this.releaseFlipImages();
     // 作废进行中的异步窗口 / 分页 / 预取，否则销毁后仍会继续读盘与 measureTextSize
     this.windowSeq++;
     this.pageSeq++;
@@ -755,7 +441,7 @@ export struct TextReaderView {
    */
   private headerVisible(): boolean {
     if (this.mode === ReadingMode.HORIZONTAL) {
-      const item = this.pageSource.itemAt(this.currentPage);
+      const item = this.pageWindow.source.itemAt(this.currentPage);
       if (item === undefined) {
         return true;
       }
@@ -781,7 +467,7 @@ export struct TextReaderView {
     if (this.mode !== ReadingMode.HORIZONTAL) {
       return;
     }
-    // 延迟一帧，确保同一批下发的 chapterIndex / startCharOffset 等 @Prop 已全部更新
+    // 延迟一帧，确保同一批下发的 chapterIndex / startCharOffset 等 @Param 已全部更新
     this.scheduleOnce((): void => {
       this.reload(this.startCharOffset);
     }, 0);
@@ -801,7 +487,7 @@ export struct TextReaderView {
     if (this.mode !== ReadingMode.VERTICAL) {
       return;
     }
-    // 延迟一帧再读目标，确保 jumpChapter / jumpOffset 等 @Prop 已全部更新到位
+    // 延迟一帧再读目标，确保 jumpChapter / jumpOffset 等 @Param 已全部更新到位
     this.scheduleOnce((): void => {
       this.initWindow(this.jumpChapter, this.jumpOffset);
     }, 0);
@@ -809,8 +495,7 @@ export struct TextReaderView {
 
   /** 字号 / 行距变化：清空页缓存后按当前锚点重建页窗口并做无动画定位 */
   private onConfigChanged(): void {
-    this.pageCache.clear();
-    this.pageCacheKeys = [];
+    this.pageWindow.cacheClear();
     // 排版参数变了，进行中的分页结果全部作废
     this.layoutEpoch++;
     if (this.mode === ReadingMode.VERTICAL) {
@@ -846,9 +531,6 @@ export struct TextReaderView {
     const seq = this.windowSeq;
     this.verticalReady = true;
     this.anchorChapter = -1;
-    this.loadingChapters.clear();
-    this.chapterTexts.clear();
-    this.chapterBlockCounts.clear();
     let start = centerChapter - WINDOW_RADIUS;
     if (start < 0) {
       start = 0;
@@ -857,8 +539,6 @@ export struct TextReaderView {
     if (end > this.chapterCount - 1) {
       end = this.chapterCount - 1;
     }
-    this.windowStart = start;
-    this.windowEnd = end;
     const indexes: number[] = [];
     const promises: Promise<string>[] = [];
     for (let i = start; i <= end; i++) {
@@ -869,99 +549,24 @@ export struct TextReaderView {
     if (seq !== this.windowSeq) {
       return;
     }
-    const blocks: ReaderBlock[] = [];
-    for (let i = 0; i < indexes.length; i++) {
-      const chapter = indexes[i];
-      const text = i < texts.length ? texts[i] : '';
-      this.chapterTexts.set(chapter, text);
-      const chapterBlocks = this.buildChapterBlocks(chapter, text);
-      this.chapterBlockCounts.set(chapter, chapterBlocks.length);
-      for (let j = 0; j < chapterBlocks.length; j++) {
-        blocks.push(chapterBlocks[j]);
-      }
-    }
-    this.blockSource.reset(blocks);
+    this.blockWindow.reset(centerChapter, indexes, texts, (chapter: number): string => this.chapterTitleOf(chapter));
     this.currentChapter = centerChapter;
     this.currentCharOffset = charOffset;
-    const index = this.findBlockIndex(centerChapter, charOffset);
+    const index = this.blockWindow.findBlockIndex(centerChapter, charOffset);
     this.pendingScrollIndex = index >= 0 ? index : 0;
     this.pendingScrollAlign = ScrollAlign.START;
     this.firstVisibleIndex = this.pendingScrollIndex;
     this.lastVisibleStart = this.pendingScrollIndex;
     this.lastVisibleEnd = this.pendingScrollIndex;
     this.updateRatio(centerChapter, charOffset);
-    // 双保险：数据源重置后若 List 可见索引未变、onScrollIndex 不触发，下一帧主动定位
+    // 双保险：数据源重置后若 List 可见索引未变、onScrollIndex 不触发，下一帧主动定位。
+    // 必须等一帧布局（16ms）：setTimeout(0) 早于新数据项的挂载，scrollToIndex 会落在旧列表上
+    // 被 clamp 到末尾，表现为「跳章后停在了更靠后的位置」。
     this.scheduleOnce((): void => {
       this.consumePendingScroll();
-    }, 0);
+    }, 16);
     hilog.info(DOMAIN, TAG, 'initWindow center=%{public}d window=[%{public}d,%{public}d] blocks=%{public}d',
-      centerChapter, this.windowStart, this.windowEnd, blocks.length);
-  }
-
-  /** 把一章切成 [章标题块] + [正文分块] */
-  private buildChapterBlocks(chapter: number, text: string): ReaderBlock[] {
-    const blocks: ReaderBlock[] = [];
-    const title = this.chapterTitleOf(chapter);
-    if (title.length > 0) {
-      blocks.push(ReaderBlock.of('title', title, chapter, 0, 0));
-    }
-    let cursor = 0;
-    while (cursor < text.length) {
-      let end = Math.min(text.length, cursor + CHUNK_CHARS);
-      if (end < text.length) {
-        // 尽量在换行处断开，避免把一段切两半
-        const newline = text.indexOf('\n', end);
-        if (newline > 0 && newline - end < CHUNK_NEWLINE_SLACK) {
-          end = newline + 1;
-        }
-      }
-      blocks.push(ReaderBlock.of('text', text.substring(cursor, end), chapter, cursor, end));
-      cursor = end;
-    }
-    return blocks;
-  }
-
-  /**
-   * 在块列表里找到「某章、某偏移」所在的块索引。
-   *
-   * 注意：不能一遇到标题块就返回。标题块的 start/end 都是 0，若在此直接 return，
-   * 任何一次锚点补偿（前插 / 头部回收 / 打开书恢复进度）都会落到该章标题，
-   * 表现为"滚到章末又跳回章首"。
-   *
-   * - offset <= 0 视为章首，返回标题块（无标题则返回该章第一块正文）
-   * - offset > 0 返回最后一个 start <= offset 的正文块（偏移超过章末时即最后一块，
-   *   "上一章"按钮定位到章末依赖这一点）
-   */
-  private findBlockIndex(chapter: number, offset: number): number {
-    const blocks = this.blockSource.snapshot();
-    let titleIndex = -1;
-    let firstTextIndex = -1;
-    let matchedTextIndex = -1;
-    for (let i = 0; i < blocks.length; i++) {
-      const block = blocks[i];
-      if (block.chapterIndex !== chapter) {
-        continue;
-      }
-      if (block.kind === 'title') {
-        if (titleIndex < 0) {
-          titleIndex = i;
-        }
-        continue;
-      }
-      if (firstTextIndex < 0) {
-        firstTextIndex = i;
-      }
-      if (block.start <= offset) {
-        matchedTextIndex = i;
-      }
-    }
-    if (offset <= 0) {
-      return titleIndex >= 0 ? titleIndex : firstTextIndex;
-    }
-    if (matchedTextIndex >= 0) {
-      return matchedTextIndex;
-    }
-    return titleIndex >= 0 ? titleIndex : firstTextIndex;
+      centerChapter, this.blockWindow.startChapter, this.blockWindow.endChapter, this.blockWindow.totalCount());
   }
 
   /** 请求加载某一章（追加或前插），带去重与序号校验 */
@@ -969,13 +574,13 @@ export struct TextReaderView {
     if (chapter < 0 || chapter >= this.chapterCount) {
       return;
     }
-    if (this.chapterTexts.has(chapter) || this.loadingChapters.has(chapter)) {
+    if (this.blockWindow.hasChapter(chapter) || this.blockWindow.isLoading(chapter)) {
       return;
     }
-    this.loadingChapters.add(chapter);
+    this.blockWindow.markLoading(chapter);
     const seq = this.windowSeq;
     this.chapterTextProvider(chapter).then((text: string) => {
-      this.loadingChapters.delete(chapter);
+      this.blockWindow.clearLoading(chapter);
       if (seq !== this.windowSeq) {
         return;
       }
@@ -985,43 +590,37 @@ export struct TextReaderView {
         this.onChapterAppend(chapter, text);
       }
     }).catch(() => {
-      this.loadingChapters.delete(chapter);
+      this.blockWindow.clearLoading(chapter);
     });
   }
 
   private onChapterAppend(chapter: number, text: string): void {
-    if (chapter !== this.windowEnd + 1) {
+    if (chapter !== this.blockWindow.endChapter + 1) {
       return;
     }
-    this.chapterTexts.set(chapter, text);
-    const blocks = this.buildChapterBlocks(chapter, text);
-    this.chapterBlockCounts.set(chapter, blocks.length);
-    this.blockSource.append(blocks);
-    this.windowEnd = chapter;
-    hilog.debug(DOMAIN, TAG, 'append chapter %{public}d blocks=%{public}d', chapter, blocks.length);
+    this.blockWindow.append(chapter, text, this.chapterTitleOf(chapter));
+    hilog.debug(DOMAIN, TAG, 'append chapter %{public}d blocks=%{public}d', chapter,
+      this.blockWindow.blockCount(chapter));
   }
 
   private onChapterPrepend(chapter: number, text: string): void {
-    if (chapter !== this.windowStart - 1) {
+    if (chapter !== this.blockWindow.startChapter - 1) {
       return;
     }
     // 前插会把内容整体下移，先记录锚点，稍后补偿滚动位置
     this.captureAnchor();
-    this.chapterTexts.set(chapter, text);
-    const blocks = this.buildChapterBlocks(chapter, text);
-    this.chapterBlockCounts.set(chapter, blocks.length);
-    this.blockSource.prepend(blocks);
-    this.windowStart = chapter;
+    this.blockWindow.prepend(chapter, text, this.chapterTitleOf(chapter));
     // 前插把内容整体下移，必须立即补偿，否则会先闪一帧下移后的画面
     this.scheduleOnce((): void => {
       this.applyAnchorCompensation();
     }, 0);
-    hilog.debug(DOMAIN, TAG, 'prepend chapter %{public}d blocks=%{public}d', chapter, blocks.length);
+    hilog.debug(DOMAIN, TAG, 'prepend chapter %{public}d blocks=%{public}d', chapter,
+      this.blockWindow.blockCount(chapter));
   }
 
   /** 记录当前首个可见块作为锚点 */
   private captureAnchor(): void {
-    const blocks = this.blockSource.snapshot();
+    const blocks = this.blockWindow.source.snapshot();
     const index = this.firstVisibleIndex;
     if (index < 0 || index >= blocks.length) {
       return;
@@ -1036,40 +635,30 @@ export struct TextReaderView {
 
   /** 滚动到窗口尾部/头部附近时预加载相邻章 */
   private maybeLoadMore(start: number, end: number): void {
-    if (end >= this.blockSource.totalCount() - LOAD_AHEAD_BLOCKS
-      && this.windowEnd < this.chapterCount - 1) {
-      this.requestChapter(this.windowEnd + 1, false);
+    if (end >= this.blockWindow.source.totalCount() - LOAD_AHEAD_BLOCKS
+      && this.blockWindow.endChapter < this.chapterCount - 1) {
+      this.requestChapter(this.blockWindow.endChapter + 1, false);
     }
-    if (start <= LOAD_AHEAD_BLOCKS && this.windowStart > 0) {
-      this.requestChapter(this.windowStart - 1, true);
+    if (start <= LOAD_AHEAD_BLOCKS && this.blockWindow.startChapter > 0) {
+      this.requestChapter(this.blockWindow.startChapter - 1, true);
     }
   }
 
   /** 窗口章数超过上限时，回收离当前可见章更远的一端 */
   private maybeTrim(): void {
-    const chapters = this.windowEnd - this.windowStart + 1;
+    const chapters = this.blockWindow.chapterCount();
     if (chapters <= WINDOW_MAX_CHAPTERS) {
       return;
     }
-    const distanceHead = this.currentChapter - this.windowStart;
-    const distanceTail = this.windowEnd - this.currentChapter;
+    const distanceHead = this.currentChapter - this.blockWindow.startChapter;
+    const distanceTail = this.blockWindow.endChapter - this.currentChapter;
     if (distanceTail >= distanceHead) {
       // 回收尾部：不影响可见区
-      const tailCount = this.chapterBlockCounts.get(this.windowEnd);
-      const count = tailCount !== undefined ? tailCount : 0;
-      this.chapterTexts.delete(this.windowEnd);
-      this.chapterBlockCounts.delete(this.windowEnd);
-      this.blockSource.removeTail(count);
-      this.windowEnd--;
+      this.blockWindow.removeTail();
     } else {
       // 回收头部：先记录锚点，删除后立即补偿，避免中间渲染一帧错位内容
       this.captureAnchor();
-      const headCount = this.chapterBlockCounts.get(this.windowStart);
-      const count = headCount !== undefined ? headCount : 0;
-      this.chapterTexts.delete(this.windowStart);
-      this.chapterBlockCounts.delete(this.windowStart);
-      this.blockSource.removeHead(count);
-      this.windowStart++;
+      this.blockWindow.removeHead();
       this.scheduleOnce((): void => {
         this.applyAnchorCompensation();
       }, 0);
@@ -1078,8 +667,7 @@ export struct TextReaderView {
 
   /** 更新整体比例（保留两位精度，供父组件算百分比） */
   private updateRatio(chapter: number, offset: number): void {
-    const text = this.chapterTexts.get(chapter);
-    const length = text !== undefined ? text.length : 0;
+    const length = this.blockWindow.chapterText(chapter).length;
     const intra = length > 0 ? offset / length : 0;
     const total = this.chapterCount > 0 ? this.chapterCount : 1;
     this.currentRatio = (chapter + intra) / total;
@@ -1090,7 +678,7 @@ export struct TextReaderView {
    * 目录高亮与进度归属都以此为准；补偿定位仍用首可见块，避免定位偏半屏。
    */
   private updateProgressFromCenter(start: number, end: number): void {
-    const total = this.blockSource.totalCount();
+    const total = this.blockWindow.source.totalCount();
     if (total <= 0) {
       return;
     }
@@ -1106,7 +694,7 @@ export struct TextReaderView {
 
   /** 根据某个块更新当前章 / 章内偏移，并降频上报 */
   private updateProgressFromBlocks(index: number): void {
-    const blocks = this.blockSource.snapshot();
+    const blocks = this.blockWindow.source.snapshot();
     const block = blocks[index];
     if (block === undefined) {
       return;
@@ -1132,7 +720,7 @@ export struct TextReaderView {
     if (this.anchorChapter < 0) {
       return;
     }
-    const index = this.findBlockIndex(this.anchorChapter, this.anchorOffset);
+    const index = this.blockWindow.findBlockIndex(this.anchorChapter, this.anchorOffset);
     this.anchorChapter = -1;
     if (index < 0) {
       return;
@@ -1169,7 +757,7 @@ export struct TextReaderView {
     this.lastVisibleStart = start;
     this.lastVisibleEnd = end;
     // 章标题块滚进视野时收起顶部小标题，滚过去后再出现
-    const titleOnScreen = this.blockSource.hasKindBetween(start, end, 'title');
+    const titleOnScreen = this.blockWindow.hasKindBetween(start, end, 'title');
     if (titleOnScreen !== this.headerSuppressed) {
       this.headerSuppressed = titleOnScreen;
     }
@@ -1240,12 +828,9 @@ export struct TextReaderView {
     if (seq !== this.pageSeq || items.length === 0) {
       return;
     }
-    this.pageWindowStart = center;
-    this.pageWindowEnd = center;
-    this.loadingPageChapters.clear();
+    this.pageWindow.reset(center, items);
     this.beginPageSync();
     this.turnTargetPage = -1;
-    this.pageSource.reset(items);
     this.pagedReady = true;
     const index = this.findPageIndex(center, charOffset);
     this.currentPage = index >= 0 ? index : 0;
@@ -1291,16 +876,13 @@ export struct TextReaderView {
    * 排版代次（layoutEpoch）变化时中途放弃，返回空数组由调用方忽略。
    */
   private async pagesOfChapterAsync(chapter: number): Promise<PagedItem[]> {
-    const width = this.contentWidth();
-    const height = this.pageContentHeight();
     const title = this.chapterTitleOf(chapter);
-    const titleExtra = this.titleBlockHeightOf(title);
-    const key = `${Math.round(width)}x${Math.round(height)}|${this.fontSize}|${this.lineHeightRatio}|` +
-      `${Math.round(titleExtra)}|${this.fontFamily}`;
-    const cached = this.pageCache.get(chapter);
-    if (cached !== undefined && cached.key === key) {
-      this.touchPageCache(chapter);
-      return cached.items;
+    const config = LayoutConfig.of(this.fontSize, this.lineHeightValue(), this.contentWidth(),
+      this.pageContentHeight(), this.titleBlockHeightOf(title), this.fontFamily);
+    const key = config.key();
+    const cached = this.pageWindow.cacheGet(chapter, key);
+    if (cached !== undefined) {
+      return cached;
     }
     const epoch = this.layoutEpoch;
     const t0 = Date.now();
@@ -1308,9 +890,8 @@ export struct TextReaderView {
     if (epoch !== this.layoutEpoch) {
       return [];
     }
-    this.chapterLengths.set(chapter, text.length);
-    const session = TextPaginator.createSession(this.getUIContext(), text, width, height,
-      this.fontSize, this.lineHeightValue(), titleExtra, this.fontFamily);
+    this.pageWindow.setChapterLength(chapter, text.length);
+    const session = TextPaginator.createSession(this.getUIContext(), text, config);
     while (!session.isFinished()) {
       session.step(PAGINATE_SLICE_PAGES);
       if (session.isFinished()) {
@@ -1325,12 +906,15 @@ export struct TextReaderView {
     const items: PagedItem[] = [];
     for (let i = 0; i < result.ranges.length; i++) {
       const range = result.ranges[i];
-      items.push(PagedItem.of(chapter, i, text.substring(range.start, range.end), range.start));
+      // pageStarts 与 ranges[i].start 恒等，这里取 pageStarts 作为「页首偏移」的权威值，
+      // PageWindow 的二分查找与锚点定位都依赖它单调递增
+      const start = i < result.pageStarts.length ? result.pageStarts[i] : range.start;
+      items.push(PagedItem.of(chapter, i, text.substring(start, range.end), start));
     }
     if (items.length === 0) {
       items.push(PagedItem.of(chapter, 0, '', 0));
     }
-    this.putPageCache(chapter, key, items);
+    this.pageWindow.cachePut(chapter, key, items);
     hilog.info(DOMAIN, TAG, 'paginate chapter=%{public}d pages=%{public}d chars=%{public}d cost=%{public}dms',
       chapter, items.length, text.length, Date.now() - t0);
     return items;
@@ -1352,50 +936,14 @@ export struct TextReaderView {
     return this.chapterTextProvider(chapter);
   }
 
-  private putPageCache(chapter: number, key: string, items: PagedItem[]): void {
-    if (this.pageCache.size >= PAGE_CACHE_LIMIT && this.pageCacheKeys.length > 0) {
-      const oldest = this.pageCacheKeys.shift();
-      if (oldest !== undefined) {
-        this.pageCache.delete(oldest);
-      }
-    }
-    this.pageCache.set(chapter, PagedChapter.of(key, items));
-    this.pageCacheKeys.push(chapter);
-  }
-
-  /** 命中缓存时把章号移到队尾，实现 LRU 淘汰顺序 */
-  private touchPageCache(chapter: number): void {
-    const index = this.pageCacheKeys.indexOf(chapter);
-    if (index >= 0) {
-      this.pageCacheKeys.splice(index, 1);
-      this.pageCacheKeys.push(chapter);
-    }
-  }
-
   /** 在当前窗口内找到「某章、某偏移」对应的页索引，找不到返回 -1 */
   private findPageIndex(chapter: number, offset: number): number {
-    const total = this.pageSource.totalCount();
-    let target = -1;
-    for (let i = 0; i < total; i++) {
-      const item = this.pageSource.itemAt(i);
-      if (item === undefined || item.chapter !== chapter) {
-        continue;
-      }
-      if (target < 0) {
-        target = i;
-      }
-      if (item.start <= offset) {
-        target = i;
-      } else {
-        break;
-      }
-    }
-    return target;
+    return this.pageWindow.findPageIndex(chapter, offset);
   }
 
   /** Swiper 换页：更新锚点与进度，并按需补章 / 回收远端章 */
   private handlePageChange(index: number): void {
-    const total = this.pageSource.totalCount();
+    const total = this.pageWindow.source.totalCount();
     if (index < 0 || index >= total) {
       return;
     }
@@ -1408,7 +956,7 @@ export struct TextReaderView {
       this.currentPage = index;
       return;
     }
-    const item = this.pageSource.itemAt(index);
+    const item = this.pageWindow.source.itemAt(index);
     if (item === undefined) {
       return;
     }
@@ -1427,8 +975,8 @@ export struct TextReaderView {
 
   /** 与竖排同一套百分比：按章等权 + 章内字符比例，不依赖全书总页数 */
   private updatePagedRatio(chapter: number, offset: number): void {
-    const length = this.chapterLengths.get(chapter);
-    const safeLength = length !== undefined && length > 0 ? length : 1;
+    const cachedLength = this.pageWindow.chapterLength(chapter);
+    const safeLength = cachedLength > 0 ? cachedLength : 1;
     let intra = offset / safeLength;
     if (intra < 0) {
       intra = 0;
@@ -1445,56 +993,54 @@ export struct TextReaderView {
     if (!this.pagedReady) {
       return;
     }
-    const total = this.pageSource.totalCount();
-    if (index >= total - PAGE_LOAD_AHEAD && this.pageWindowEnd < this.chapterCount - 1) {
-      this.appendNextChapter(this.pageWindowEnd + 1);
+    const total = this.pageWindow.source.totalCount();
+    if (index >= total - PAGE_LOAD_AHEAD && this.pageWindow.endChapter < this.chapterCount - 1) {
+      this.appendNextChapter(this.pageWindow.endChapter + 1);
     }
-    if (index <= PAGE_LOAD_AHEAD - 1 && this.pageWindowStart > 0) {
-      this.prependPrevChapter(this.pageWindowStart - 1);
+    if (index <= PAGE_LOAD_AHEAD - 1 && this.pageWindow.startChapter > 0) {
+      this.prependPrevChapter(this.pageWindow.startChapter - 1);
     }
     this.trimPageWindow(this.pagedChapter);
   }
 
   /** 尾部补章：不动既有索引 */
   private async appendNextChapter(chapter: number): Promise<void> {
-    if (chapter < 0 || chapter >= this.chapterCount || chapter !== this.pageWindowEnd + 1) {
+    if (chapter < 0 || chapter >= this.chapterCount || chapter !== this.pageWindow.endChapter + 1) {
       return;
     }
-    if (this.loadingPageChapters.has(chapter)) {
+    if (this.pageWindow.isLoading(chapter)) {
       return;
     }
-    this.loadingPageChapters.add(chapter);
+    this.pageWindow.markLoading(chapter);
     const items = await this.pagesOfChapterAsync(chapter);
-    this.loadingPageChapters.delete(chapter);
+    this.pageWindow.clearLoading(chapter);
     // 异步期间窗口可能已被重建，校验后再插入；分页被作废时返回空数组
-    if (chapter !== this.pageWindowEnd + 1 || items.length === 0) {
+    if (chapter !== this.pageWindow.endChapter + 1 || items.length === 0) {
       return;
     }
-    this.pageSource.appendChapter(items);
-    this.pageWindowEnd = chapter;
+    this.pageWindow.appendChapter(chapter, items);
     hilog.debug(DOMAIN, TAG, 'append chapter %{public}d pages=%{public}d', chapter, items.length);
     this.trimPageWindow(this.pagedChapter);
   }
 
   /** 头部补章：前插后必须无动画补偿当前页索引 */
   private async prependPrevChapter(chapter: number): Promise<void> {
-    if (chapter < 0 || chapter >= this.chapterCount || chapter !== this.pageWindowStart - 1) {
+    if (chapter < 0 || chapter >= this.chapterCount || chapter !== this.pageWindow.startChapter - 1) {
       return;
     }
-    if (this.loadingPageChapters.has(chapter)) {
+    if (this.pageWindow.isLoading(chapter)) {
       return;
     }
-    this.loadingPageChapters.add(chapter);
+    this.pageWindow.markLoading(chapter);
     const items = await this.pagesOfChapterAsync(chapter);
-    this.loadingPageChapters.delete(chapter);
-    if (chapter !== this.pageWindowStart - 1 || items.length === 0) {
+    this.pageWindow.clearLoading(chapter);
+    if (chapter !== this.pageWindow.startChapter - 1 || items.length === 0) {
       return;
     }
     const before = this.currentPage;
     this.beginPageSync();
-    this.pageSource.prependChapter(items);
-    this.pageWindowStart = chapter;
-    this.currentPage = before + items.length;
+    const inserted = this.pageWindow.prependChapter(chapter, items);
+    this.currentPage = before + inserted;
     this.swiperController.changeIndex(this.currentPage, false);
     hilog.debug(DOMAIN, TAG, 'prepend chapter %{public}d pages=%{public}d', chapter, items.length);
     this.trimPageWindow(this.pagedChapter);
@@ -1502,19 +1048,16 @@ export struct TextReaderView {
 
   /** 窗口章数超过上限时回收离当前页更远的一端，并补偿索引 */
   private trimPageWindow(chapter: number): void {
-    const chapters = this.pageWindowEnd - this.pageWindowStart + 1;
-    if (chapters <= PAGE_WINDOW_MAX_CHAPTERS) {
+    if (this.pageWindow.chapterCount() <= PAGE_WINDOW_MAX_CHAPTERS) {
       return;
     }
-    const distanceHead = chapter - this.pageWindowStart;
-    const distanceTail = this.pageWindowEnd - chapter;
+    const distanceHead = chapter - this.pageWindow.startChapter;
+    const distanceTail = this.pageWindow.endChapter - chapter;
     if (distanceTail >= distanceHead) {
-      this.pageSource.removeTailChapter(this.pageWindowEnd);
-      this.pageWindowEnd--;
+      this.pageWindow.trimTail();
     } else {
       this.beginPageSync();
-      const removed = this.pageSource.removeHeadChapter(this.pageWindowStart);
-      this.pageWindowStart++;
+      const removed = this.pageWindow.trimHead();
       if (removed > 0) {
         this.currentPage = Math.max(0, this.currentPage - removed);
         this.swiperController.changeIndex(this.currentPage, false);
@@ -1546,9 +1089,9 @@ export struct TextReaderView {
    */
   private onAnnotationsChanged(): void {
     if (this.mode === ReadingMode.VERTICAL) {
-      this.blockSource.refreshRange(this.lastVisibleStart - 1, this.lastVisibleEnd + 1);
+      this.blockWindow.source.refreshRange(this.lastVisibleStart - 1, this.lastVisibleEnd + 1);
     } else {
-      this.pageSource.refreshRange(this.currentPage - 1, this.currentPage + 1);
+      this.pageWindow.source.refreshRange(this.currentPage - 1, this.currentPage + 1);
     }
   }
 
@@ -1755,14 +1298,200 @@ export struct TextReaderView {
     this.onTap();
   }
 
+  // ================= 仿真翻页：手势 + 卷曲 =================
+
+  /** 页组件 id：截图按 id 抓取，跨章窗口前插导致索引变化时按当前值实时取 */
+  private pageComponentId(index: number): string {
+    return `reader_page_${index}`;
+  }
+
+  private releaseImage(target: image.PixelMap | undefined): void {
+    if (target === undefined) {
+      return;
+    }
+    try {
+      target.release();
+    } catch (e) {
+      // 位图可能已被系统回收，释放失败不影响后续
+    }
+  }
+
+  private releaseFlipImages(): void {
+    this.releaseImage(this.flipPageImage);
+    this.releaseImage(this.flipTargetImage);
+    this.flipPageImage = undefined;
+    this.flipTargetImage = undefined;
+    this.flipTargetPending = false;
+  }
+
+  /** 抓当前页位图（手势起点唯一依赖的图，先抓它） */
+  private captureFlipPage(index: number): void {
+    if (index < 0 || index >= this.pageWindow.source.totalCount()) {
+      return;
+    }
+    this.getUIContext().getComponentSnapshot().get(this.pageComponentId(index))
+      .then((pixelMap: image.PixelMap) => {
+        this.releaseImage(this.flipPageImage);
+        this.flipPageImage = pixelMap;
+      })
+      .catch((error: Error) => {
+        hilog.warn(DOMAIN, TAG, 'capture page %{public}d failed: %{public}s', index, error.message);
+      });
+  }
+
+  /** 抓目标页位图；在途期间不重复发起（拖动每帧都会走到这里） */
+  private captureFlipTarget(index: number): void {
+    if (this.flipTargetPending || index < 0 || index >= this.pageWindow.source.totalCount()) {
+      return;
+    }
+    this.flipTargetPending = true;
+    this.getUIContext().getComponentSnapshot().get(this.pageComponentId(index))
+      .then((pixelMap: image.PixelMap) => {
+        this.flipTargetPending = false;
+        this.releaseImage(this.flipTargetImage);
+        this.flipTargetImage = pixelMap;
+      })
+      .catch((error: Error) => {
+        this.flipTargetPending = false;
+        hilog.warn(DOMAIN, TAG, 'capture target %{public}d failed: %{public}s', index, error.message);
+      });
+  }
+
+  /** 手势起点：状态机接管，只抓当前页；方向与目标页等首次位移再定 */
+  private onFlipStart(): void {
+    if (!this.canSimulationFlip()) {
+      return;
+    }
+    this.flipMachine.begin();
+    this.flipProgress = 0;
+    this.flipDirection = 1;
+    this.flipTargetPending = false;
+    this.releaseImage(this.flipTargetImage);
+    this.flipTargetImage = undefined;
+    this.captureFlipPage(this.currentPage);
+  }
+
+  /**
+   * 拖动中：位移交给状态机换算方向与进度。
+   * 方向首次确定（或反转）时才抓目标页；位图没到之前视觉层不绘制，
+   * 用户看到的是真实页面，所以首帧不会闪白，只是卷曲效果晚一两帧出现。
+   */
+  private onFlipUpdate(offsetX: number): void {
+    const update: FlipUpdate = this.flipMachine.update(offsetX, this.lastWidth);
+    if (!update.active) {
+      return;
+    }
+    this.flipDirection = update.direction;
+    if (update.needTarget) {
+      this.captureFlipTarget(update.direction > 0 ? this.currentPage + 1 : this.currentPage - 1);
+    }
+    this.flipProgress = update.progress;
+  }
+
+  /** 抬手：状态机按位移与速度判定翻满 / 回弹，补间结束后再真正切索引 */
+  private onFlipEnd(velocityX: number): void {
+    if (!this.flipMachine.isDragging()) {
+      return;
+    }
+    const result: FlipEnd = this.flipMachine.end(velocityX);
+    this.flipBusy = true;
+    this.getUIContext().animateTo({
+      duration: FLIP_SETTLE_DURATION,
+      curve: Curve.EaseOut
+    }, () => {
+      this.flipProgress = result.commit ? 1 : 0;
+    });
+    this.scheduleOnce((): void => {
+      this.settleFlip(result.commit, result.direction);
+    }, FLIP_SETTLE_DURATION);
+  }
+
+  private onFlipCancel(): void {
+    if (!this.flipMachine.isDragging()) {
+      return;
+    }
+    this.flipMachine.cancel();
+    this.flipBusy = true;
+    this.getUIContext().animateTo({
+      duration: FLIP_SETTLE_DURATION,
+      curve: Curve.EaseOut
+    }, () => {
+      this.flipProgress = 0;
+    });
+    this.scheduleOnce((): void => {
+      this.settleFlip(false, 1);
+    }, FLIP_SETTLE_DURATION);
+  }
+
+  /** 卷曲补间落地：清位图后按需切页（silent 切换，不再重播动画） */
+  private settleFlip(commit: boolean, direction: number): void {
+    this.flipBusy = false;
+    this.flipProgress = 0;
+    this.flipMachine.reset();
+    this.releaseFlipImages();
+    if (commit) {
+      this.turnPage(direction, true);
+    }
+  }
+
+  /**
+   * 点击翻页的整页卷曲：先抓两张位图再起补间。
+   * 位图没就绪也照常推进（结束后照常切页），只是这一段看不到卷曲。
+   */
+  private playFlipTo(target: number): void {
+    const direction = target >= this.currentPage ? 1 : -1;
+    this.flipBusy = true;
+    this.flipDirection = direction;
+    this.flipProgress = 0;
+    this.captureFlipPage(this.currentPage);
+    this.captureFlipTarget(target);
+    this.scheduleOnce((): void => {
+      this.getUIContext().animateTo({
+        duration: FLIP_AUTO_DURATION,
+        curve: Curve.EaseInOut
+      }, () => {
+        this.flipProgress = 1;
+      });
+      this.scheduleOnce((): void => {
+        this.flipBusy = false;
+        this.flipProgress = 0;
+        this.flipMachine.reset();
+        this.releaseFlipImages();
+        this.swiperController.changeIndex(target, false);
+        this.turnTargetPage = target;
+        this.turnTargetAt = Date.now();
+      }, FLIP_AUTO_DURATION);
+    }, 40);
+  }
+
+  /** 仿真翻页的可用条件：横向分页、仿真模式、控制栏收起、无选区操作、无动画在跑 */
+  private canSimulationFlip(): boolean {
+    if (this.mode !== ReadingMode.HORIZONTAL) {
+      return false;
+    }
+    if (this.pageTurn !== PageTurnMode.SIMULATION) {
+      return false;
+    }
+    if (this.controlsVisible || this.flipBusy || this.selectionLocked) {
+      return false;
+    }
+    return !this.pageDragLocked();
+  }
+
+  /** 数据源重建窗口期不接手势，避免抓到错位页的位图 */
+  private pageDragLocked(): boolean {
+    return !this.pagedReady || this.pageSyncLock;
+  }
+
   /**
    * 左右模式点击翻页。已在窗口端部时先补相邻章，补完后等补偿锁释放再翻，
    * 否则本次翻页会被 beginPageSync 的 48ms 锁吞掉。
    * 基准页用 turnTargetPage（动画未落地时是上一击的逻辑目标），
    * 保证快速连点时每一击各翻一页，不因 currentPage 迟迟不更新而重复翻同一页。
+   * silent 为 true 表示调用方已播完自己的视觉（如手势卷曲），这里只切索引。
    */
-  private async turnPage(delta: number): Promise<void> {
-    const total = this.pageSource.totalCount();
+  private async turnPage(delta: number, silent: boolean = false): Promise<void> {
+    const total = this.pageWindow.source.totalCount();
     if (total === 0) {
       return;
     }
@@ -1774,22 +1503,38 @@ export struct TextReaderView {
     let target = base + delta;
     let needSync = false;
     if (target < 0) {
-      if (this.pageWindowStart <= 0 || base !== this.currentPage) {
+      if (this.pageWindow.startChapter <= 0 || base !== this.currentPage) {
         return;
       }
-      await this.prependPrevChapter(this.pageWindowStart - 1);
+      await this.prependPrevChapter(this.pageWindow.startChapter - 1);
       target = this.currentPage - 1;
       needSync = true;
     } else if (target >= total) {
-      if (this.pageWindowEnd >= this.chapterCount - 1 || base !== this.currentPage) {
+      if (this.pageWindow.endChapter >= this.chapterCount - 1 || base !== this.currentPage) {
         return;
       }
-      await this.appendNextChapter(this.pageWindowEnd + 1);
+      await this.appendNextChapter(this.pageWindow.endChapter + 1);
       target = this.currentPage + 1;
       needSync = true;
     }
-    const max = this.pageSource.totalCount();
+    const max = this.pageWindow.source.totalCount();
     if (target < 0 || target >= max) {
+      return;
+    }
+    this.turnTargetPage = target;
+    this.turnTargetAt = now;
+    if (silent) {
+      // 手势卷曲已播完，这里只落索引，不能再播一次动画
+      this.swiperController.changeIndex(target, false);
+      return;
+    }
+    if (this.pageTurn === PageTurnMode.SIMULATION) {
+      // 卷曲动画进行中不排队：直接落索引，避免两张位图交叉叠画
+      if (this.flipBusy) {
+        this.swiperController.changeIndex(target, false);
+        return;
+      }
+      this.playFlipTo(target);
       return;
     }
     const animated = this.pageTurn !== PageTurnMode.NONE;
@@ -1800,8 +1545,6 @@ export struct TextReaderView {
     } else {
       this.swiperController.changeIndex(target, animated);
     }
-    this.turnTargetPage = target;
-    this.turnTargetAt = now;
   }
 
   /** 上下模式点击翻屏：按可视高度滚动一屏，跨章自然滚过章标题 */
@@ -1841,7 +1584,7 @@ export struct TextReaderView {
   @Builder
   verticalBody() {
     List({ scroller: this.verticalScroller }) {
-      LazyForEach(this.blockSource, (block: ReaderBlock, index: number) => {
+      LazyForEach(this.blockWindow.source, (block: ReaderBlock, index: number) => {
         ListItem() {
           if (block.kind === 'title') {
             Text(block.text)
@@ -1885,7 +1628,7 @@ export struct TextReaderView {
   @Builder
   horizontalBody() {
     Swiper(this.swiperController) {
-      LazyForEach(this.pageSource, (item: PagedItem, index: number) => {
+      LazyForEach(this.pageWindow.source, (item: PagedItem, index: number) => {
         Column() {
           // 每章第 0 页顶部渲染该章标题（分页时已扣减这部分高度）
           if (item.pageIndex === 0 && this.chapterTitleOf(item.chapter).length > 0) {
@@ -1911,6 +1654,8 @@ export struct TextReaderView {
           bottom: CONTENT_PAD
         })
         .shadow(this.pageShadow())
+        // 仿真翻页按 id 抓当前页 / 目标页位图（见 captureFlipPage）
+        .id(this.pageComponentId(index))
       }, (item: PagedItem) => `${item.key}_${item.text.length}_${this.annotationsVersion}`)
     }
     .width('100%')
@@ -1921,7 +1666,8 @@ export struct TextReaderView {
     .cachedCount(1)
     .duration(this.turnDuration())
     .curve(this.turnCurve())
-    .disableSwipe(this.controlsVisible)
+    // 仿真模式下滑动由 PanGesture 接管（跟手卷曲），Swiper 只负责索引切换
+    .disableSwipe(this.controlsVisible || this.pageTurn === PageTurnMode.SIMULATION)
     .onChange((index: number) => {
       this.handlePageChange(index);
     })
@@ -1937,9 +1683,33 @@ export struct TextReaderView {
         } else {
           this.horizontalBody()
         }
+        if (this.mode === ReadingMode.HORIZONTAL) {
+          FlipOverlay({
+            progress: this.flipProgress,
+            flipDirection: this.flipDirection,
+            currentPage: this.flipPageImage,
+            nextPage: this.flipTargetImage
+          })
+        }
       }
       .width('100%')
       .layoutWeight(1)
+      // parallelGesture 不抢子组件手势：Swiper 滑动（横滑模式）与长按选词仍按原逻辑工作
+      .parallelGesture(
+        PanGesture({ fingers: 1, direction: PanDirection.Horizontal })
+          .onActionStart(() => {
+            this.onFlipStart();
+          })
+          .onActionUpdate((event: GestureEvent) => {
+            this.onFlipUpdate(event.offsetX);
+          })
+          .onActionEnd((event: GestureEvent) => {
+            this.onFlipEnd(event.velocityX);
+          })
+          .onActionCancel(() => {
+            this.onFlipCancel();
+          })
+      )
 
       ReaderFooter({
         progressText: this.footerProgress(),

@@ -1,3 +1,4 @@
+import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { curves } from '@kit.ArkUI';
 import { AppSkin, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
@@ -33,46 +34,52 @@ const TXT_MAX_SELECT = 20;
 const ZIP_MAX_SELECT = 1;
 
 @Entry
-@Component
+@ComponentV2
 struct Index {
-  @State books: BookMeta[] = [];
-  @State importing: boolean = false;
-  @State importStage: string = '';
-  @State currentTab: number = TAB_BOOKSHELF;
-  @State bookFilter: number = FILTER_ALL;
-  @State groups: string[] = [];
-  @State selecting: boolean = false;
-  @State selectedIds: string[] = [];
+  @Local books: BookMeta[] = [];
+  @Local importing: boolean = false;
+  @Local importStage: string = '';
+  @Local currentTab: number = TAB_BOOKSHELF;
+  @Local bookFilter: number = FILTER_ALL;
+  @Local groups: string[] = [];
+  @Local selecting: boolean = false;
+  @Local selectedIds: string[] = [];
   // 长按单本进入的管理态：该书放大、其余雾化，书下方弹出操作项
-  @State managing: boolean = false;
-  @State manageTargetId: string = '';
+  @Local managing: boolean = false;
+  @Local manageTargetId: string = '';
   // 分组选择面板 / 新建分组对话框
-  @State groupSheetVisible: boolean = false;
-  @State newGroupVisible: boolean = false;
-  @State newGroupName: string = '';
-  @State topInset: number = 0;
-  @State bottomInset: number = 0;
+  @Local groupSheetVisible: boolean = false;
+  @Local newGroupVisible: boolean = false;
+  @Local newGroupName: string = '';
+  @Local topInset: number = 0;
+  @Local bottomInset: number = 0;
   // 「我的」页刷新信号：从阅读页返回时让统计组件重新取数
-  @State profileRefresh: number = 0;
+  @Local profileRefresh: number = 0;
   // 顶部浮动栏实测高度：内容区用它做首屏留白，滚动后内容才能滑进模糊区
-  @State topBarHeight: number = 0;
+  @Local topBarHeight: number = 0;
   // 深色模式：EntryAbility 在创建与配置变更时写入，页面只做消费
-  @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
-    ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
-  @StorageProp('appSkin') @Watch('onAppSkinChanged') appSkin: string = AppSkin.GOLD;
-  @State palette: ShelfThemeColors = ShelfTheme.light();
+  // App 级环境（系统深浅色 / 皮肤）：@ComponentV2 不支持 @StorageProp，改用 @ObservedV2 单例
+  @Local env: AppEnv = AppEnvStore.get();
+  @Monitor('env.colorMode') onColorModeMonitor(): void {
+    this.onSystemColorModeChanged();
+  }
+
+  @Monitor('env.appSkin') onSkinMonitor(): void {
+    this.onAppSkinChanged();
+  }
+  @Local palette: ShelfThemeColors = ShelfTheme.light();
 
   private appContext(): common.UIAbilityContext {
     return this.getUIContext().getHostContext() as common.UIAbilityContext;
   }
 
   private isSystemDark(): boolean {
-    return this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+    return this.env.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
   }
 
   /** key 含皮肤 + 亮暗，换皮肤时底色不变也能触发重绘 */
   private applyPalette(): void {
-    const next = ShelfTheme.resolve(this.isSystemDark(), this.appSkin);
+    const next = ShelfTheme.resolve(this.isSystemDark(), this.env.appSkin);
     if (next.key !== this.palette.key) {
       this.palette = next;
     }
@@ -574,6 +581,39 @@ struct Index {
       return;
     }
     this.toast(`已导入 ${okCount} 本，${total - okCount} 本失败：${firstError}`);
+  }
+
+  /** 导入 EPUB：一次一个文件，解包后按 spine 顺序抽成单章 txt */
+  private async importEpub(): Promise<void> {
+    if (this.importing) {
+      return;
+    }
+    const context = this.appContext();
+    try {
+      const options = new picker.DocumentSelectOptions();
+      options.fileSuffixFilters = ['EPUB 电子书|.epub'];
+      options.maxSelectNumber = 1;
+      const docPicker = new picker.DocumentViewPicker(context);
+      const uris: string[] = await docPicker.select(options);
+      if (uris.length === 0) {
+        return;
+      }
+      this.importing = true;
+      this.importStage = '准备导入';
+      const result = await ImportService.importEpub(uris[0],
+        (stage: string, current: number, total: number): void => {
+          this.importStage = total > 1 ? `${stage} ${current}/${total}` : stage;
+        });
+      this.handleImportResult(result);
+    } catch (e) {
+      const err = e as BusinessError;
+      if (err.message !== undefined && err.message.length > 0) {
+        this.toast(`导入失败：${err.message}`);
+      }
+    } finally {
+      this.importing = false;
+      this.importStage = '';
+    }
   }
 
   /** 导入图片书：一次只能选一个 ZIP */
@@ -1181,6 +1221,10 @@ struct Index {
       MenuItem({ content: '导入 TXT 文本' })
         .onClick(() => {
           this.importTxt();
+        })
+      MenuItem({ content: '导入 EPUB 电子书' })
+        .onClick(() => {
+          this.importEpub();
         })
       MenuItem({ content: '导入 ZIP 图片包' })
         .onClick(() => {

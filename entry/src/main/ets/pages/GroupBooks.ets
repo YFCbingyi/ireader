@@ -1,3 +1,4 @@
+import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { BookMeta, GroupParams, ReaderParams } from '../model/BookModels';
 import { AppSkin, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
@@ -13,25 +14,31 @@ import { BookCard } from '../components/BookCard';
  * 放入分组的书不在书架重复展示，只在这里出现；返回即回到书架。
  */
 @Entry
-@Component
+@ComponentV2
 struct GroupBooks {
-  @State group: string = '';
-  @State books: BookMeta[] = [];
-  @State selecting: boolean = false;
-  @State selectedIds: string[] = [];
-  @State renameVisible: boolean = false;
-  @State groupDraft: string = '';
-  @State topInset: number = 0;
-  @State bottomInset: number = 0;
+  @Local group: string = '';
+  @Local books: BookMeta[] = [];
+  @Local selecting: boolean = false;
+  @Local selectedIds: string[] = [];
+  @Local renameVisible: boolean = false;
+  @Local groupDraft: string = '';
+  @Local topInset: number = 0;
+  @Local bottomInset: number = 0;
   // 深色模式：与书架首页共用同一套色板，避免深色下进分组页底色仍是浅米色
-  @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
-    ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
-  @StorageProp('appSkin') @Watch('onAppSkinChanged') appSkin: string = AppSkin.GOLD;
-  @State palette: ShelfThemeColors = ShelfTheme.light();
+  // App 级环境（系统深浅色 / 皮肤）：@ComponentV2 不支持 @StorageProp，改用 @ObservedV2 单例
+  @Local env: AppEnv = AppEnvStore.get();
+  @Monitor('env.colorMode') onColorModeMonitor(): void {
+    this.onSystemColorModeChanged();
+  }
+
+  @Monitor('env.appSkin') onSkinMonitor(): void {
+    this.onAppSkinChanged();
+  }
+  @Local palette: ShelfThemeColors = ShelfTheme.light();
 
   private applyPalette(): void {
-    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
-      this.appSkin);
+    const next = ShelfTheme.resolve(this.env.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
+      this.env.appSkin);
     if (next.key !== this.palette.key) {
       this.palette = next;
     }

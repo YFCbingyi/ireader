@@ -4,7 +4,7 @@ import { AppBootstrap } from '../service/AppBootstrap';
 import { ProfilePanel } from '../components/ProfilePanel';
 
 @Entry
-@Component
+@ComponentV2
 struct Profile {
   aboutToAppear(): void {
     AppBootstrap.init(this.getUIContext().getHostContext() as common.UIAbilityContext);

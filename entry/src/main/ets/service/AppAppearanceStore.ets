@@ -1,4 +1,5 @@
 import { AppSkin, AppSkinMeta } from '../model/ShelfTheme';
+import { AppEnvStore } from '../model/AppEnv';
 import { AppPaths } from '../utils/AppPaths';
 import { FileUtil } from '../utils/FileUtil';
 
@@ -17,7 +18,7 @@ export class AppAppearanceStore {
 
   /** 每个页面入口都会调 AppBootstrap.init，皮肤在此注入 AppStorage */
   static init(): void {
-    AppStorage.setOrCreate<string>('appSkin', AppAppearanceStore.current());
+    AppEnvStore.get().appSkin = AppAppearanceStore.current();
   }
 
   static current(): string {
@@ -38,6 +39,6 @@ export class AppAppearanceStore {
     const data = new AppAppearance();
     data.skin = normalized;
     FileUtil.writeTextAtomic(AppAppearanceStore.path(), JSON.stringify(data));
-    AppStorage.setOrCreate<string>('appSkin', normalized);
+    AppEnvStore.get().appSkin = normalized;
   }
 }

@@ -14,11 +14,14 @@ import { NaturalSort } from '../utils/NaturalSort';
 import { ImageMetaReader } from './ImageMetaReader';
 import { LibraryStore } from './LibraryStore';
 import { TxtImportTask } from './TxtImportTask';
+import { EpubParser } from './EpubParser';
 
 const MAX_TEXT_BYTES = 50 * 1024 * 1024;
 const MAX_ZIP_ORIGINAL_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_ZIP_LABEL = '2GB';
 const MAX_CHAPTERS = 1000;
+const MAX_EPUB_BYTES = 500 * 1024 * 1024;
+const MAX_EPUB_LABEL = '500MB';
 
 export class ChapterScan {
   title: string = '';
@@ -152,6 +155,70 @@ export class ImportService {
         FileUtil.deleteRecursive(zipPath);
       }
       return ImportResult.ok(bookId, title, skipped);
+    } catch (e) {
+      FileUtil.deleteRecursive(bookDir);
+      return ImportResult.fail(ImportService.errorMessage(e as Error));
+    }
+  }
+
+  /**
+   * 导入 EPUB：解包后按 spine 顺序抽出每章纯文本，复用文本书的落盘结构。
+   *
+   * EPUB 只是「ZIP + XML + XHTML」，正文抽成单章 txt 后，
+   * 阅读、分页、进度、搜索、划线全都不需要区分来源格式。
+   */
+  static async importEpub(uri: string, onProgress: ImportProgressCallback): Promise<ImportResult> {
+    const bookId = ImportService.newId();
+    const bookDir = AppPaths.bookDir(bookId);
+    const bookRel = AppPaths.bookRel(bookId);
+    const epubPath = `${bookDir}/source.epub`;
+    const extractDir = `${bookDir}/content`;
+    try {
+      const size = FileUtil.uriSize(uri);
+      if (size > MAX_EPUB_BYTES) {
+        throw new Error(`EPUB 超过 ${MAX_EPUB_LABEL}`);
+      }
+      FileUtil.ensureDir(bookDir);
+      onProgress('复制文件', 0, 1);
+      FileUtil.copyUriToFile(uri, epubPath);
+      if (FileUtil.fileSize(epubPath) <= 0) {
+        throw new Error('文件为空');
+      }
+      onProgress('解压 epub', 0, 1);
+      FileUtil.ensureDir(extractDir);
+      await zlib.decompressFile(epubPath, extractDir);
+      onProgress('解析章节', 0, 0);
+      const parsed = EpubParser.parse(extractDir);
+      if (parsed.chapters.length === 0) {
+        throw new Error('未解析出任何章节');
+      }
+      if (parsed.chapters.length > MAX_CHAPTERS) {
+        throw new Error('章节数量超过 1000');
+      }
+      const textDir = `${bookDir}/text`;
+      FileUtil.ensureDir(textDir);
+      const manifest = new BookManifest();
+      for (let i = 0; i < parsed.chapters.length; i++) {
+        const chapter = parsed.chapters[i];
+        const fileName = `${ImportService.pad4(i + 1)}.txt`;
+        FileUtil.writeText(`${textDir}/${fileName}`, chapter.content);
+        manifest.chapters.push(ChapterMeta.text(chapter.title, `${bookRel}/text/${fileName}`,
+          chapter.content.length));
+        if (i % 10 === 0) {
+          onProgress('写入章节', i, parsed.chapters.length);
+        }
+      }
+      onProgress('写入书架', parsed.chapters.length, parsed.chapters.length);
+      LibraryStore.saveManifest(bookId, manifest);
+      const title = parsed.title.length > 0 ? parsed.title : ImportService.titleFromUri(uri);
+      const book = BookMeta.of(bookId, title, BookType.TEXT, manifest.chapters.length);
+      book.coverFile = parsed.coverRel;
+      LibraryStore.saveBook(book);
+      // 原始 epub 不再需要；content/ 保留（封面图可能在这里）
+      if (FileUtil.exists(epubPath)) {
+        FileUtil.deleteRecursive(epubPath);
+      }
+      return ImportResult.ok(bookId, title, 0);
     } catch (e) {
       FileUtil.deleteRecursive(bookDir);
       return ImportResult.fail(ImportService.errorMessage(e as Error));

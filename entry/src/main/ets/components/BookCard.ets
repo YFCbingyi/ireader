@@ -1,3 +1,4 @@
+import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { ConfigurationConstant } from '@kit.AbilityKit';
 import { BookMeta, BookType } from '../model/BookModels';
 import { AppSkin, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
@@ -10,31 +11,37 @@ const LABEL_FONT_SIZE = 13;
 const LABEL_LINE_HEIGHT = 17;
 
 
-@Component
+@ComponentV2
 export struct BookCard {
-  @Prop book: BookMeta = new BookMeta();
-  @Prop selecting: boolean = false;
-  @Prop selected: boolean = false;
+  @Param book: BookMeta = new BookMeta();
+  @Param selecting: boolean = false;
+  @Param selected: boolean = false;
   // 封面书名文字区实测宽度（vp），用来算每行能放几个字
-  @State coverTextWidth: number = 0;
+  @Local coverTextWidth: number = 0;
   // 封面下方书名标签的实测宽度（vp）
-  @State labelWidth: number = 0;
-  onOpen: (book: BookMeta) => void = (book: BookMeta): void => {};
-  onLongPress: (book: BookMeta) => void = (book: BookMeta): void => {};
-  onSelect: (book: BookMeta) => void = (book: BookMeta): void => {};
+  @Local labelWidth: number = 0;
+  @Event onOpen: (book: BookMeta) => void = (book: BookMeta): void => {};
+  @Event onLongPress: (book: BookMeta) => void = (book: BookMeta): void => {};
+  @Event onSelect: (book: BookMeta) => void = (book: BookMeta): void => {};
   // 亮暗跟随系统、封面美术与卡片文字均跟随「我的 - 外观」皮肤
-  @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
-    ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
-  @StorageProp('appSkin') @Watch('onAppSkinChanged') appSkin: string = AppSkin.GOLD;
-  @State palette: ShelfThemeColors = ShelfTheme.light();
+  // App 级环境（系统深浅色 / 皮肤）：@ComponentV2 不支持 @StorageProp，改用 @ObservedV2 单例
+  @Local env: AppEnv = AppEnvStore.get();
+  @Monitor('env.colorMode') onColorModeMonitor(): void {
+    this.onSystemColorModeChanged();
+  }
+
+  @Monitor('env.appSkin') onSkinMonitor(): void {
+    this.onAppSkinChanged();
+  }
+  @Local palette: ShelfThemeColors = ShelfTheme.light();
 
   aboutToAppear(): void {
     this.applyPalette();
   }
 
   private applyPalette(): void {
-    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
-      this.appSkin);
+    const next = ShelfTheme.resolve(this.env.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
+      this.env.appSkin);
     if (next.key !== this.palette.key) {
       this.palette = next;
     }

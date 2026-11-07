@@ -1,20 +1,27 @@
+import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { ConfigurationConstant } from '@kit.AbilityKit';
 import { AppSkin, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
 
-@Component
+@ComponentV2
 export struct DiscoverPanel {
-  @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
-    ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
-  @StorageProp('appSkin') @Watch('onAppSkinChanged') appSkin: string = AppSkin.GOLD;
-  @State palette: ShelfThemeColors = ShelfTheme.light();
+  // App 级环境（系统深浅色 / 皮肤）：@ComponentV2 不支持 @StorageProp，改用 @ObservedV2 单例
+  @Local env: AppEnv = AppEnvStore.get();
+  @Monitor('env.colorMode') onColorModeMonitor(): void {
+    this.onSystemColorModeChanged();
+  }
+
+  @Monitor('env.appSkin') onSkinMonitor(): void {
+    this.onAppSkinChanged();
+  }
+  @Local palette: ShelfThemeColors = ShelfTheme.light();
 
   aboutToAppear(): void {
     this.applyPalette();
   }
 
   private applyPalette(): void {
-    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
-      this.appSkin);
+    const next = ShelfTheme.resolve(this.env.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
+      this.env.appSkin);
     if (next.key !== this.palette.key) {
       this.palette = next;
     }

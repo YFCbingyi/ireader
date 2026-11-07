@@ -18,11 +18,12 @@
 |---|---|
 | UI | ArkUI 声明式，Stage 模型，单 Ability（`EntryAbility`） |
 | 构建 | hvigor（`assembleHap`），hdc 安装 |
-| 状态 | 组件内 `@State`/`@Prop` + `@StorageProp`（仅 `systemColorMode`、`appActive`） |
+| 状态 | 全量 V2 装饰器：`@ComponentV2`/`@Local`/`@Param`/`@Event`/`@Monitor`；App 级环境用 `@ObservedV2` 单例 `AppEnv`（取代 `@StorageProp`） |
 | 持久化 | 沙箱 JSON 文件（无 Preferences、无数据库） |
 | 文本解码 | `TextCodec`（BOM / UTF-8 / GBK 探测） |
 | 大文件解析 | `taskpool` + `@Concurrent`（`TxtImportTask`） |
-| 分页测量 | `UIContext.getMeasureUtils().measureTextSize`：探针标定字宽/行高 + 字宽模型推算页边界 + 单页实测校验 |
+| 分页测量 | `UIContext.getMeasureUtils().measureTextSize`：探针标定字宽/行高 + 字宽模型推算页边界 + 单页实测校验，参数统一走 `LayoutConfig` |
+| 电子书 | TXT / EPUB（`EpubParser` 解包后按 spine 抽成单章 txt）/ ZIP 图片包 |
 | 第三方依赖 | 无 |
 
 ArkTS 硬约束（踩过的坑）：
@@ -38,10 +39,16 @@ ArkTS 硬约束（踩过的坑）：
 
 ```
 entry/src/main/ets/
+├── reader/                   # Engine / Strategy 层（纯 TS，不依赖 ArkUI 状态）
+│   ├── PageWindow.ets        # 左右分页窗口：跨章页序列 + 章级分页缓存 LRU + 单调偏移二分查页
+│   ├── BlockWindow.ets       # 上下卷轴窗口：600 字分块 + 章范围 + 锚点查块
+│   ├── FlipStateMachine.ets  # 拖动型翻页状态机：位移/速度 → 方向 + 进度 + 是否抓目标页
+│   └── LayoutConfig.ets      # 排版参数单点下发 + 分页缓存键
 ├── model/
 │   ├── BookModels.ets        # 全部领域模型与枚举（BookType / ReadingMode /
 │   │                         #   ReadingProgress / BookMeta / ChapterMeta / ImageEntry / BookManifest /
 │   │                         #   Bookmark / ReaderSettings / SearchHit / ImportResult / ImportProgressCallback）
+│   ├── AppEnv.ets            # @ObservedV2 全局环境单例（系统深浅色 / 前后台 / 皮肤）
 │   ├── Annotation.ets        # 划线/想法模型（Annotation）+ 渲染片段切分（SegmentBuilder）
 │   ├── ReaderTheme.ets       # 阅读页主题：ReadingTheme 枚举 + ReaderThemeColors 三套配色
 │   ├── ShelfTheme.ets        # App 外壳皮肤：AppSkin 枚举 + ShelfThemeColors 亮/暗色板（含书卡封面配色）
@@ -49,6 +56,7 @@ entry/src/main/ets/
 ├── service/
 │   ├── ImportService.ets     # importTxt（走 taskpool）/ importZip（解压 + 扫描）
 │   ├── TxtImportTask.ets     # @Concurrent 解析任务：读盘 → 解码 → 切分 → 逐章写盘 → 返回 JSON
+│   ├── EpubParser.ets        # EPUB 解析：container.xml → OPF → spine → XHTML 转纯文本
 │   ├── TextCodec.ets         # 编码识别 + 章节切分（decode / normalize / splitChapters）
 │   ├── TextPaginator.ets     # 单章分页（PaginationSession 可分批推进：探针标定 + 字宽模型 + 单页校验）
 │   ├── ImageMetaReader.ets   # 读取图片宽高，产出 ImageEntry
@@ -64,7 +72,8 @@ entry/src/main/ets/
 │   ├── DiscoverPanel.ets     # 发现页占位
 │   ├── ProfilePanel.ets      # 「我的」页：时长 / 继续阅读 / 习惯统计 / 热力图 / 笔记 / 设置与备份
 │   └── reader/
-│       ├── TextReaderView.ets   # 文本书：竖排块窗口 + 左右页窗口
+│       ├── TextReaderView.ets   # 文本书：竖排块窗口 + 左右页窗口 + 仿真翻页手势
+│       ├── FlipOverlay.ets      # 仿真翻页视觉层：Canvas 绘制目标页位图 + 当前页平移 + 卷边阴影
 │       ├── ImageReaderView.ets  # 图片书：竖排图片块窗口 + 左右图片页窗口
 │       ├── ImageDataSource.ets  # ImagePage + 跨章图片页数据源
 │       └── ReaderPanels.ets     # 目录（书名 + 目录/笔记 tab + 30 章分档）/ 书签 / 阅读设置 / 全文搜索
@@ -104,10 +113,10 @@ class BookMeta {
 
 class ReadingProgress {
   chapterIndex: number;   // 章号（不是 id）
-  charOffset: number;     // TXT：章内字符偏移
-  pageIndex: number;      // IMAGE：章内图片序号
-  scrollRatio: number;    // 章内比例（0..1）
-  percent: number;        // 全书百分比（按章等权）
+  charOffset: number;     // TEXT/EPUB：章内字符偏移（唯一锚点）
+  pageIndex: number;      // 仅 IMAGE 使用：章内图片序号
+  scrollRatio: number;    // 仅 IMAGE 使用：章内比例
+  percent: number;        // 全书百分比（按章等权，书架卡片展示）
   updatedAt: number;
 }
 
@@ -132,6 +141,8 @@ class Bookmark {
 ```
 
 **核心设计**：正文不内联在模型里。`ChapterMeta` 只存**文件路径 + 字符数**，正文按章从磁盘读。这是 10MB 级 TXT 不爆内存的前提。
+
+**进度锚点**：文本书（含 EPUB）落盘只写 `chapterIndex + charOffset`；`pageIndex / scrollRatio` 是排版派生值，换字号后失效，只在图片书里有意义。
 
 ## 5. 持久化布局（沙箱 `filesDir`）
 
@@ -158,13 +169,18 @@ filesDir/
 
 ```mermaid
 flowchart LR
-  A[DocumentViewPicker<br>.txt / .zip] --> B{类型}
+  A[DocumentViewPicker<br>.txt / .epub / .zip] --> B{类型}
   B -- TXT --> C[copyUriToFile -> source.txt]
   C --> D[taskpool.execute TxtImportTask]
   D --> E[读盘 + TextCodec.decode/normalize<br>+ splitChapters + 逐章 writeText]
   E --> F[返回 JSON: chapters/trimmed/charCount]
   F --> G[主线程建 BookManifest + BookMeta]
   G --> H[LibraryStore.saveManifest/saveBook]
+  B -- EPUB --> P[copy -> source.epub]
+  P --> Q[zlib.decompressFile -> content/]
+  Q --> R[EpubParser: container.xml -> OPF<br>-> spine 顺序 -> XHTML 转纯文本]
+  R --> S[逐章 writeText 到 text/]
+  S --> H
   B -- ZIP --> I[copy -> source.zip]
   I --> J[zlib.decompressFile -> content/]
   J --> K[scanChapters 按目录成章<br>ImageMetaReader 读宽高]
@@ -174,6 +190,7 @@ flowchart LR
 - 进度回调只有三档：`复制文件` / `解析章节` / `写入书架`。taskpool 内不做逐章回传（跨线程回调成本高）。
 - 失败统一 `FileUtil.deleteRecursive(bookDir)` 回滚。
 - 图片书限制：压缩包原始大小与解压后总大小都有上限，超限图片计入 `skippedImages`。
+- EPUB 只取文本（图片/样式丢弃），抽成单章 txt 后与 TXT 书完全同构，阅读/分页/搜索/划线无需分支；封面取 `properties="cover-image"`，退回 `meta name="cover"`。
 
 ## 7. 阅读页壳（`pages/Reader.ets`）
 
@@ -223,11 +240,19 @@ aboutToAppear
 
 ## 8. 文本书渲染（`components/reader/TextReaderView.ets`）
 
-一个组件承载两种模式，由 `@Prop mode` 切换。两种模式共用 `chapterTextProvider`（父组件注入的按章取文回调，带缓存）与 `chapterTitleOf`。
+一个组件承载两种模式，由 `@Param mode` 切换。两种模式共用 `chapterTextProvider`（父组件注入的按章取文回调，带缓存）与 `chapterTitleOf`。
+
+窗口本身的数据与算法已下沉到 `reader/` 层（`PageWindow` / `BlockWindow`），组件只保留渲染与交互：
+
+| 层 | 职责 | 位置 |
+|---|---|---|
+| Engine | 页序列 / 块序列、章范围、缓存 LRU、锚点查找 | `reader/PageWindow.ets`、`reader/BlockWindow.ets` |
+| Strategy | 拖动状态机（方向 / 进度 / 是否抓目标页） | `reader/FlipStateMachine.ets` |
+| Container | Swiper（左右）、List（竖排）、Canvas 卷曲层 | `TextReaderView.ets`、`FlipOverlay.ets` |
 
 ### 8.1 竖排：跨章块窗口
 
-数据单位是 `ReaderBlock`：
+数据单位是 `ReaderBlock`（定义在 `reader/BlockWindow.ets`）：
 
 ```
 ReaderBlock { kind: 'title' | 'text', text, chapterIndex, start, end }
@@ -291,7 +316,27 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 - **页脚**：右侧 `x/y章`（无进度时回退 `第 x/y 章 · z%`），不含页号；左侧为时间 + 电量角标，受 `settings.showFooterTime` 控制显隐。
 - **点击分区**（`handleTap`）：左侧 30% 上一页、右侧 30% 下一页（`turnPage`），中间 40% 唤起控制栏。翻页到达窗口端部时先 `await` 补章，再延迟 60ms 越过 `beginPageSync` 锁执行 `changeIndex(..., true)`。
 
-### 8.3 长按选词：复制 / 划线 / 想法 / 词典
+### 8.3 仿真翻页（卷曲）
+
+`PageTurnMode.SIMULATION` 不再复用 Swiper 的滑动动画，改为**手势接管 + 位图卷曲**：
+
+1. Swiper 在仿真模式下 `disableSwipe(true)`，只负责 `changeIndex` 切索引；
+2. 容器上挂 `parallelGesture(PanGesture(Horizontal))`，不抢子组件手势；
+3. 手势起点 `getUIContext().getComponentSnapshot().get('reader_page_{index}')` 抓当前页位图，
+   方向确定后再抓目标页位图（`FlipStateMachine` 只在方向首次确定/反转时返回 `needTarget`）；
+4. `FlipStateMachine.update()` 把位移换算成 0~1 进度，`FlipOverlay` 每帧绘制：
+   底层铺目标页、上层按 `progress × 页宽` 平移当前页、边缘画卷边阴影与纸张背面高光；
+5. 抬手按「位移 ≥ 30% 或速度 ≥ 320vp/s」判定翻满，`animateTo` 补间到 1（或回弹到 0），
+   落地后 `settleFlip()` 清位图并 `turnPage(dir, silent=true)` 直接切索引。
+
+约束：
+
+- 两张位图齐备前 `FlipOverlay` 整层不绘制（只画一张会露出空白底，等同闪屏）；
+- 位图必须显式 `release()`（`aboutToDisappear` 也释放），否则每翻几页漏两张；
+- 点击两侧翻页同一条路径（`playFlipTo`），动画期间不排队新翻转，避免两张位图交叉；
+- 卷曲是**几何近似**（平移 + 曲线阴影 + 背面高光），不是逐列位图变形——后者在 Canvas 上无法保证 60fps。
+
+### 8.4 长按选词：复制 / 划线 / 想法 / 词典
 
 正文 `Text` 开启 `copyOption(CopyOptions.LocalDevice)`，长按即可拖选；菜单通过
 `editMenuOptions` 在系统默认项（复制 / 全选）之后追加三项自定义动作：
@@ -308,7 +353,7 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 - 标注坐标是「章号 + 章内字符偏移」，与 `ReadingProgress.charOffset` 同坐标，跨排版与跨阅读模式都稳定。
 - 渲染：块内无标注走 `Text(content)` 快路径；有标注时用 `Text() { ForEach(SegmentBuilder.build(...)) { Span } }`
   切分为样式片段：划线统一 `decoration(Underline)`，带想法的再加 `textBackgroundStyle` 浅底（无标注片段用透明色/None 占位）。
-- 刷新：`annotationsVersion` 变化时 `@Watch` 调 `onDataChange` 只刷新可见区（竖排 `lastVisibleStart-1..lastVisibleEnd+1`，
+- 刷新：`annotationsVersion` 变化时 `@Monitor` 调 `onDataChange` 只刷新可见区（竖排 `lastVisibleStart-1..lastVisibleEnd+1`，
   左右 `currentPage±1`）。**只改 key 不够**——`LazyForEach` 缓存了每项的 key，外部状态变化不会重跑 item builder，
   必须显式 `listener.onDataChange(index)` 才会重建该项，否则表现为"划线要退出重进才显示"。
 - 单击：可选中文本后，正文 `Text` 会吃掉根容器的 `onClick`，所以每块正文自己也挂了 `onClick`，

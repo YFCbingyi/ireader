@@ -39,73 +39,73 @@ class NoteItem {
   annotation: Annotation | undefined = undefined;
 }
 
-@Component
+@ComponentV2
 export struct ReaderPanels {
-  @Prop panel: string = '';
-  @Prop bookTitle: string = '';
-  // 目录用的章节表可能上千条，@Prop 会在父组件每次刷新时深拷贝整表；
-  // 本组件只读不改，改用 @Link 按引用传递（父组件传 $chapterList）
-  @Link chapters: ChapterMeta[];
-  @Prop currentChapter: number = 0;
+  @Param panel: string = '';
+  @Param bookTitle: string = '';
+  // 目录用的章节表可能上千条，@Param 会在父组件每次刷新时深拷贝整表；
+  // 本组件只读不改：@Param 单向传入即可，不需要双向绑定
+  @Param chapters: ChapterMeta[] = [];
+  @Param currentChapter: number = 0;
   // 当前章内偏移：目录里「当前读到」右侧的位置数字
-  @Prop currentOffset: number = 0;
-  @Prop bookmarks: Bookmark[] = [];
-  @Prop annotations: Annotation[] = [];
-  @Prop isImageBook: boolean = false;
-  @Prop pageTurn: PageTurnMode = PageTurnMode.VERTICAL;
-  @Prop fontSize: number = 18;
-  @Prop lineHeightRatio: number = 1.7;
-  @Prop fontFamily: string = '';
-  @Prop fontList: string[] = [];
-  @Prop textAlignMode: TextAlignMode = TextAlignMode.AUTO;
-  @Prop theme: ReadingTheme = ReadingTheme.EYE;
-  @Prop colors: ReaderThemeColors = new ReaderThemeColors();
+  @Param currentOffset: number = 0;
+  @Param bookmarks: Bookmark[] = [];
+  @Param annotations: Annotation[] = [];
+  @Param isImageBook: boolean = false;
+  @Param pageTurn: PageTurnMode = PageTurnMode.VERTICAL;
+  @Param fontSize: number = 18;
+  @Param lineHeightRatio: number = 1.7;
+  @Param fontFamily: string = '';
+  @Param fontList: string[] = [];
+  @Param textAlignMode: TextAlignMode = TextAlignMode.AUTO;
+  @Param theme: ReadingTheme = ReadingTheme.EYE;
+  @Param colors: ReaderThemeColors = new ReaderThemeColors();
   // 阅读设置：页脚时间电量开关
-  @Prop showFooterTime: boolean = true;
+  @Param showFooterTime: boolean = true;
   // 全文搜索：关键字、进行中状态与进度、结果、逐书历史
-  @Prop searchKeyword: string = '';
-  @Prop searchRunning: boolean = false;
-  @Prop searchProgress: string = '';
-  @Prop searchResults: SearchHit[] = [];
-  @Prop searchHistory: string[] = [];
+  @Param searchKeyword: string = '';
+  @Param searchRunning: boolean = false;
+  @Param searchProgress: string = '';
+  @Param searchResults: SearchHit[] = [];
+  @Param searchHistory: string[] = [];
 
-  onClose: () => void = (): void => {};
+  @Event onClose: () => void = (): void => {};
   // 点面板外的正文区遮罩：连控制栏一起收起，直接回到可翻页的阅读状态
-  onDismissToReading: () => void = (): void => {};
-  onSelectChapter: (index: number) => void = (index: number): void => {};
-  onSelectBookmark: (bookmark: Bookmark) => void = (bookmark: Bookmark): void => {};
-  onDeleteBookmark: (bookmark: Bookmark) => void = (bookmark: Bookmark): void => {};
-  onSelectAnnotation: (annotation: Annotation) => void = (annotation: Annotation): void => {};
-  onDeleteAnnotation: (annotation: Annotation) => void = (annotation: Annotation): void => {};
-  onFontSizeChange: (size: number) => void = (size: number): void => {};
-  onLineHeightChange: (ratio: number) => void = (ratio: number): void => {};
-  onThemeChange: (theme: ReadingTheme) => void = (theme: ReadingTheme): void => {};
+  @Event onDismissToReading: () => void = (): void => {};
+  @Event onSelectChapter: (index: number) => void = (index: number): void => {};
+  @Event onSelectBookmark: (bookmark: Bookmark) => void = (bookmark: Bookmark): void => {};
+  @Event onDeleteBookmark: (bookmark: Bookmark) => void = (bookmark: Bookmark): void => {};
+  @Event onSelectAnnotation: (annotation: Annotation) => void = (annotation: Annotation): void => {};
+  @Event onDeleteAnnotation: (annotation: Annotation) => void = (annotation: Annotation): void => {};
+  @Event onFontSizeChange: (size: number) => void = (size: number): void => {};
+  @Event onLineHeightChange: (ratio: number) => void = (ratio: number): void => {};
+  @Event onThemeChange: (theme: ReadingTheme) => void = (theme: ReadingTheme): void => {};
   // 目录 / 笔记共用一个抽屉，切换 tab 时由父组件改 panel
-  onSwitchPanel: (name: string) => void = (name: string): void => {};
-  onFontFamilyChange: (family: string) => void = (family: string): void => {};
-  onTextAlignChange: (mode: TextAlignMode) => void = (mode: TextAlignMode): void => {};
-  onPageTurnChange: (mode: PageTurnMode) => void = (mode: PageTurnMode): void => {};
-  onToggleBookmark: () => void = (): void => {};
+  @Event onSwitchPanel: (name: string) => void = (name: string): void => {};
+  @Event onFontFamilyChange: (family: string) => void = (family: string): void => {};
+  @Event onTextAlignChange: (mode: TextAlignMode) => void = (mode: TextAlignMode): void => {};
+  @Event onPageTurnChange: (mode: PageTurnMode) => void = (mode: PageTurnMode): void => {};
+  @Event onToggleBookmark: () => void = (): void => {};
   // 操作面板专用：跳章后保持面板打开，由用户自己关闭
-  onJumpChapter: (index: number) => void = (index: number): void => {};
+  @Event onJumpChapter: (index: number) => void = (index: number): void => {};
   // 阅读设置：页脚时间电量
-  onToggleFooterTime: (value: boolean) => void = (value: boolean): void => {};
+  @Event onToggleFooterTime: (value: boolean) => void = (value: boolean): void => {};
   // 全文搜索
-  onSearch: (keyword: string) => void = (keyword: string): void => {};
-  onCancelSearch: () => void = (): void => {};
-  onSelectSearchHit: (hit: SearchHit) => void = (hit: SearchHit): void => {};
-  onClearSearchHistory: () => void = (): void => {};
+  @Event onSearch: (keyword: string) => void = (keyword: string): void => {};
+  @Event onCancelSearch: () => void = (): void => {};
+  @Event onSelectSearchHit: (hit: SearchHit) => void = (hit: SearchHit): void => {};
+  @Event onClearSearchHistory: () => void = (): void => {};
 
   // 目录分档：0 = 全部，n = 第 n 段（每段 30 章）
-  @State rangeIndex: number = 0;
+  @Local rangeIndex: number = 0;
   // 笔记筛选（全部 / 书签 / 想法 / 划线）
-  @State noteFilter: number = 0;
+  @Local noteFilter: number = 0;
   // 滑块拖动中的临时值（松手才提交，避免每次移动都触发重新分页）
-  @State fontSizePreview: number = 0;
-  @State lineIndexPreview: number = 0;
-  @State progressPreview: number = -1;
+  @Local fontSizePreview: number = 0;
+  @Local lineIndexPreview: number = 0;
+  @Local progressPreview: number = -1;
   // 搜索框内容（回车或点「搜索」才提交给父组件，避免每输入一个字就全库扫）
-  @State searchInput: string = '';
+  @Local searchInput: string = '';
   private catalogScroller: Scroller = new Scroller();
 
   aboutToAppear(): void {
@@ -182,13 +182,26 @@ export struct ReaderPanels {
     }, 20);
   }
 
-  private visibleChapters(): ChapterMeta[] {
+  /**
+   * 目录当前档位的绝对章号列表。
+   *
+   * 列表项一律用「绝对章号」作为数据源，而不是「全量数组 + 档首偏移 + 相对 index」：
+   * 后者一旦 ForEach 的 index 与数据源错位（分档切换后 key 复用、列表重建时机等），
+   * 点击算出来的章号就会整体偏移 —— 表现为「点了目录里的某章，跳到更后面」。
+   */
+  private visibleIndexes(): number[] {
     const start = this.rangeStart();
     const end = this.rangeEnd();
-    if (start <= 0 && end >= this.chapters.length) {
-      return this.chapters;
+    const list: number[] = [];
+    for (let i = start; i < end; i++) {
+      list.push(i);
     }
-    return this.chapters.slice(start, end);
+    return list;
+  }
+
+  private chapterCharCount(index: number): number {
+    const chapter = this.chapters[index];
+    return chapter !== undefined ? chapter.charCount : 0;
   }
 
   /** 打开目录时把当前章节滚到可视区域中部 */
@@ -418,20 +431,19 @@ export struct ReaderPanels {
   @Builder
   catalogPanel() {
     List({ scroller: this.catalogScroller }) {
-      ForEach(this.visibleChapters(), (item: ChapterMeta, index: number) => {
+      ForEach(this.visibleIndexes(), (abs: number) => {
         ListItem() {
           Column() {
             Row() {
-              Text(item.title)
+              Text(this.chapterTitleOf(abs))
                 .layoutWeight(1)
                 .fontSize(14)
-                .fontWeight(this.currentChapter === this.rangeStart() + index ?
-                  FontWeight.Bold : FontWeight.Normal)
+                .fontWeight(this.currentChapter === abs ? FontWeight.Bold : FontWeight.Normal)
                 .fontColor(this.colors.panelText)
                 .maxLines(1)
                 .textOverflow({ overflow: TextOverflow.Ellipsis })
               if (!this.isImageBook) {
-                Text(`${item.charCount}`)
+                Text(`${this.chapterCharCount(abs)}`)
                   .fontSize(11)
                   .fontColor(this.colors.panelSubText)
                   .margin({ left: 10 })
@@ -441,11 +453,11 @@ export struct ReaderPanels {
             .height(44)
             .alignItems(VerticalAlign.Center)
             .onClick(() => {
-              this.onSelectChapter(this.rangeStart() + index);
+              this.onSelectChapter(abs);
             })
 
             // 当前阅读位置：标题下方单独一行，跟随参考样式
-            if (this.currentChapter === this.rangeStart() + index) {
+            if (this.currentChapter === abs) {
               Row() {
                 Text('♥')
                   .fontSize(11)
@@ -472,7 +484,7 @@ export struct ReaderPanels {
           .width('100%')
         }
         .width('100%')
-      }, (item: ChapterMeta, index: number) => `${this.rangeStart() + index}_${item.title}`)
+      }, (abs: number) => `${abs}_${this.chapterTitleOf(abs)}`)
     }
     .layoutWeight(1)
     .width('100%')
