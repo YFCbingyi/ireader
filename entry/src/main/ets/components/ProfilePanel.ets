@@ -3,8 +3,9 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { picker } from '@kit.CoreFileKit';
 import { BookMeta, ReaderParams } from '../model/BookModels';
 import { DailyReading } from '../model/ReadingStats';
-import { ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
+import { AppSkin, AppSkinMeta, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
 import { AppBootstrap } from '../service/AppBootstrap';
+import { AppAppearanceStore } from '../service/AppAppearanceStore';
 import { BackupService } from '../service/BackupService';
 import { HabitSummary, HeatDay, HeatWeek, NoteEntry, NoteSummary, ProfileStats, ShelfSummary } from '../service/ProfileStats';
 import { LibraryStore } from '../service/LibraryStore';
@@ -13,12 +14,13 @@ import { FileUtil } from '../utils/FileUtil';
 
 // 与 AppScope/app.json5 的 versionName 保持一致
 const APP_VERSION = '1.0.0';
-// 设置行点击分发：0 数据明细 / 1 关于 / 2 隐私 / 3 清空统计 / 4 导出备份
+// 设置行点击分发：0 数据明细 / 1 关于 / 2 隐私 / 3 清空统计 / 4 导出备份 / 5 外观
 const KIND_DATA = 0;
 const KIND_ABOUT = 1;
 const KIND_PRIVACY = 2;
 const KIND_CLEAR = 3;
 const KIND_EXPORT = 4;
+const KIND_SKIN = 5;
 
 @Component
 export struct ProfilePanel {
@@ -45,18 +47,20 @@ export struct ProfilePanel {
   // @Builder 按值传参不会随状态刷新，数值统一放状态数组，在 builder 内部按索引读取
   @State statValues: string[] = ['0 天', '0 天', '0 本', '0 秒', '0 秒', '0 秒', '0 条', '0 条', '0 条'];
   @State settingValues: string[] = ['统计中…', '', '应用沙箱', 'JSON 快照',
-    `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复'];
+    `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复', '金棕'];
   @State noteSummary: NoteSummary = new NoteSummary();
   @State recentNotes: NoteEntry[] = [];
+  @State skinPickerVisible: boolean = false;
   @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
     ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
+  @StorageProp('appSkin') @Watch('onAppSkinChanged') appSkin: string = AppSkin.GOLD;
   @State palette: ShelfThemeColors = ShelfTheme.light();
 
   private settingLabels: string[] = ['本地占用', '数据明细', '存储位置', '导出备份',
-    '关于 ireader', '隐私说明', '清空阅读统计'];
+    '关于 ireader', '隐私说明', '清空阅读统计', 'App 主题'];
   private settingKinds: number[] = [KIND_DATA, KIND_DATA, KIND_PRIVACY, KIND_EXPORT,
-    KIND_ABOUT, KIND_PRIVACY, KIND_CLEAR];
-  private settingDanger: boolean[] = [false, false, false, false, false, false, true];
+    KIND_ABOUT, KIND_PRIVACY, KIND_CLEAR, KIND_SKIN];
+  private settingDanger: boolean[] = [false, false, false, false, false, false, true, false];
   private continueBookId: string = '';
   private booksSnapshot: BookMeta[] = [];
   private slowTimer: number = -1;
@@ -79,14 +83,20 @@ export struct ProfilePanel {
   }
 
   private applyPalette(): void {
-    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
-    if (next.bg !== this.palette.bg) {
+    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
+      this.appSkin);
+    if (next.key !== this.palette.key) {
       this.palette = next;
     }
   }
 
   private onSystemColorModeChanged(): void {
     this.applyPalette();
+  }
+
+  private onAppSkinChanged(): void {
+    this.applyPalette();
+    this.refreshSettingValues();
   }
 
   private onRefreshTick(): void {
@@ -131,7 +141,7 @@ export struct ProfilePanel {
 
   private refreshSettingValues(): void {
     this.settingValues = [this.storageText, this.shelfDetail, '应用沙箱', 'JSON 快照',
-      `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复'];
+      `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复', AppSkinMeta.label(this.appSkin)];
   }
 
   private loadContinue(books: BookMeta[]): void {
@@ -248,7 +258,18 @@ export struct ProfilePanel {
       this.exportBackup();
       return;
     }
+    if (kind === KIND_SKIN) {
+      this.skinPickerVisible = true;
+      return;
+    }
     this.confirmClearStats();
+  }
+
+  /** 选皮肤：落盘 + 广播 AppStorage，书架/发现/我的页立即换色，阅读页不受影响 */
+  private chooseSkin(skin: string): void {
+    AppAppearanceStore.save(skin);
+    this.skinPickerVisible = false;
+    this.toast(`已切换为${AppSkinMeta.label(skin)}`);
   }
 
   private showDataDialog(): void {
@@ -749,6 +770,15 @@ export struct ProfilePanel {
   @Builder
   settingsArea() {
     Column() {
+      this.sectionTitle('外观')
+      Column() {
+        this.settingRow(7)
+      }
+      .width('100%')
+      .borderRadius(16)
+      .backgroundColor(this.palette.surface)
+      .border({ width: 1, color: this.palette.chipBg })
+
       this.sectionTitle('数据与存储')
       Column() {
         this.settingRow(0)
@@ -787,41 +817,119 @@ export struct ProfilePanel {
     .width('100%')
   }
 
-  build() {
-    Scroll() {
-      Column() {
-        this.totalCard()
-        this.continueCard()
-        this.statsGrid()
-        this.weeklyCard()
-        this.heatmapCard()
-        this.noteCard()
-        this.settingsArea()
+  /** App 皮肤选择弹层：与阅读页「背景」面板互不影响 */
+  @Builder
+  skinPicker() {
+    Stack({ alignContent: Alignment.Center }) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor(this.palette.scrim)
+        .onClick(() => {
+          this.skinPickerVisible = false;
+        })
 
-        Text('阅读时长按页面停留累计，应用进入后台或退出阅读页后停止计时；每日记录最多保留 90 天。')
+      Column() {
+        Text('App 主题')
           .width('100%')
-          .fontSize(11)
-          .fontColor(this.palette.subtleText)
-          .lineHeight(18)
-          .margin({ top: 18 })
-        Text('统计只保存在本机，清空统计不会影响书架里的书与阅读进度。')
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.palette.text)
+        Text('只影响书架 / 发现 / 我的页；阅读页主题在书内「背景」里单独设置')
           .width('100%')
-          .fontSize(11)
+          .fontSize(12)
           .fontColor(this.palette.subtleText)
-          .lineHeight(18)
-          .margin({ top: 4 })
-        Text('导出的备份只包含进度、书签、划线、统计与设置，不含书籍正文和图片。')
-          .width('100%')
-          .fontSize(11)
-          .fontColor(this.palette.subtleText)
-          .lineHeight(18)
-          .margin({ top: 4 })
+          .margin({ top: 8 })
+
+        Row() {
+          ForEach(AppSkinMeta.options(), (skin: string) => {
+            Column() {
+              Stack({ alignContent: Alignment.Center }) {
+                Circle()
+                  .width(44)
+                  .height(44)
+                  .fill(AppSkinMeta.swatch(skin))
+                  .stroke(this.appSkin === skin ? this.palette.accentText : this.palette.border)
+                  .strokeWidth(this.appSkin === skin ? 3 : 1)
+                if (this.appSkin === skin) {
+                  Text('✓')
+                    .fontSize(18)
+                    .fontColor(this.palette.accentText)
+                }
+              }
+              .width(44)
+              .height(44)
+
+              Text(AppSkinMeta.label(skin))
+                .fontSize(12)
+                .fontColor(this.appSkin === skin ? this.palette.accent : this.palette.subText)
+                .margin({ top: 8 })
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Center)
+            .onClick(() => {
+              this.chooseSkin(skin);
+            })
+          }, (skin: string) => skin)
+        }
+        .width('100%')
+        .margin({ top: 22 })
+      }
+      .width('86%')
+      .constraintSize({ maxWidth: 400 })
+      .padding({ left: 22, right: 22, top: 22, bottom: 24 })
+      .borderRadius(24)
+      .backgroundColor(this.palette.surfaceAlt)
+      .border({ width: 1, color: this.palette.border })
+      .shadow({ radius: 26, color: this.palette.shadow, offsetX: 0, offsetY: 8 })
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  build() {
+    Stack() {
+      Scroll() {
+        Column() {
+          this.totalCard()
+          this.continueCard()
+          this.statsGrid()
+          this.weeklyCard()
+          this.heatmapCard()
+          this.noteCard()
+          this.settingsArea()
+
+          Text('阅读时长按页面停留累计，应用进入后台或退出阅读页后停止计时；每日记录最多保留 90 天。')
+            .width('100%')
+            .fontSize(11)
+            .fontColor(this.palette.subtleText)
+            .lineHeight(18)
+            .margin({ top: 18 })
+          Text('统计只保存在本机，清空统计不会影响书架里的书与阅读进度。')
+            .width('100%')
+            .fontSize(11)
+            .fontColor(this.palette.subtleText)
+            .lineHeight(18)
+            .margin({ top: 4 })
+          Text('导出的备份只包含进度、书签、划线、统计与设置，不含书籍正文和图片。')
+            .width('100%')
+            .fontSize(11)
+            .fontColor(this.palette.subtleText)
+            .lineHeight(18)
+            .margin({ top: 4 })
+        }
+        .width('100%')
+        .padding({ left: 20, right: 20, top: this.topInset + 4, bottom: this.bottomInset })
       }
       .width('100%')
-      .padding({ left: 20, right: 20, top: this.topInset + 4, bottom: this.bottomInset })
+      .height('100%')
+      .scrollBar(BarState.Off)
+
+      if (this.skinPickerVisible) {
+        this.skinPicker()
+      }
     }
-    .layoutWeight(1)
     .width('100%')
-    .scrollBar(BarState.Off)
+    .layoutWeight(1)
   }
 }

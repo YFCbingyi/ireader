@@ -2,6 +2,7 @@ import { Annotation } from '../model/Annotation';
 import { Bookmark, BookMeta, ReaderSettings } from '../model/BookModels';
 import { ReadingStats } from '../model/ReadingStats';
 import { AnnotationStore } from './AnnotationStore';
+import { AppAppearanceStore } from './AppAppearanceStore';
 import { LibraryStore } from './LibraryStore';
 import { ReadingStatsStore } from './ReadingStatsStore';
 
@@ -18,6 +19,8 @@ export class BackupPayload {
   version: number = 1;
   exportedAt: number = 0;
   containsBookContent: boolean = false;
+  /** App 外观皮肤，与阅读主题(settings.theme)分开保存 */
+  appSkin: string = '';
   books: BookMeta[] = [];
   settings: ReaderSettings = new ReaderSettings();
   stats: ReadingStats = new ReadingStats();
@@ -30,6 +33,7 @@ export class BackupService {
     payload.exportedAt = Date.now();
     payload.books = LibraryStore.getBooks();
     payload.settings = LibraryStore.getSettings();
+    payload.appSkin = AppAppearanceStore.current();
     payload.stats = ReadingStatsStore.get();
     for (let i = 0; i < payload.books.length; i++) {
       const bookId = payload.books[i].id;

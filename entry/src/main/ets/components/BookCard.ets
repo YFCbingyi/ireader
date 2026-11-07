@@ -1,6 +1,6 @@
 import { ConfigurationConstant } from '@kit.AbilityKit';
 import { BookMeta, BookType } from '../model/BookModels';
-import { ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
+import { AppSkin, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
 
 // 封面书名文字区：字号 14，字体框宽度以实测为准
 const TITLE_FONT_SIZE = 14;
@@ -22,9 +22,10 @@ export struct BookCard {
   onOpen: (book: BookMeta) => void = (book: BookMeta): void => {};
   onLongPress: (book: BookMeta) => void = (book: BookMeta): void => {};
   onSelect: (book: BookMeta) => void = (book: BookMeta): void => {};
-  // 深色模式：卡片自身的书名/进度/选择圈跟随主题，封面美术不跟随
+  // 亮暗跟随系统、封面美术与卡片文字均跟随「我的 - 外观」皮肤
   @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
     ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
+  @StorageProp('appSkin') @Watch('onAppSkinChanged') appSkin: string = AppSkin.GOLD;
   @State palette: ShelfThemeColors = ShelfTheme.light();
 
   aboutToAppear(): void {
@@ -32,13 +33,18 @@ export struct BookCard {
   }
 
   private applyPalette(): void {
-    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK);
-    if (next.bg !== this.palette.bg) {
+    const next = ShelfTheme.resolve(this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK,
+      this.appSkin);
+    if (next.key !== this.palette.key) {
       this.palette = next;
     }
   }
 
   private onSystemColorModeChanged(): void {
+    this.applyPalette();
+  }
+
+  private onAppSkinChanged(): void {
     this.applyPalette();
   }
 
@@ -152,7 +158,7 @@ export struct BookCard {
             .height('100%')
             .linearGradient({
               angle: 135,
-              colors: [['#2C5F6E', 0.0], ['#3F8B99', 1.0]]
+              colors: [[this.palette.coverImageStart, 0.0], [this.palette.coverImageEnd, 1.0]]
             })
         } else {
           Column()
@@ -160,14 +166,14 @@ export struct BookCard {
             .height('100%')
             .linearGradient({
               angle: 135,
-              colors: [['#8B5E3C', 0.0], ['#B8860B', 1.0]]
+              colors: [[this.palette.coverTextStart, 0.0], [this.palette.coverTextEnd, 1.0]]
             })
         }
 
         Column()
           .width('calc(100% - 12vp)')
           .height('calc(100% - 12vp)')
-          .border({ width: 1, color: '#33FFF8ED' })
+          .border({ width: 1, color: this.palette.coverInkSoft })
           .borderRadius(6)
 
         Column() {
@@ -176,7 +182,7 @@ export struct BookCard {
               .width('100%')
               .fontSize(TITLE_FONT_SIZE)
               .fontWeight(FontWeight.Medium)
-              .fontColor('#FFF8ED')
+              .fontColor(this.palette.coverInk)
               .lineHeight(TITLE_LINE_HEIGHT)
               .maxLines(1)
               .textAlign(TextAlign.Center)
@@ -184,7 +190,7 @@ export struct BookCard {
           Column()
             .width(24)
             .height(1)
-            .backgroundColor('#66FFF8ED')
+            .backgroundColor(this.palette.coverInkLine)
             .margin({ top: 8 })
         }
         .width('100%')
@@ -202,7 +208,7 @@ export struct BookCard {
           Stack({ alignContent: Alignment.TopEnd }) {
             Text(this.book.type === BookType.IMAGE ? '图' : 'TXT')
               .fontSize(9)
-              .fontColor('#FFF8ED')
+              .fontColor(this.palette.coverInk)
               .padding({ left: 4, right: 4, top: 1, bottom: 1 })
               .borderRadius(4)
               .backgroundColor('#33FFFFFF')
@@ -218,7 +224,7 @@ export struct BookCard {
           Stack({ alignContent: Alignment.TopStart }) {
             Text(this.book.group)
               .fontSize(9)
-              .fontColor('#FFF8ED')
+              .fontColor(this.palette.coverInk)
               .padding({ left: 4, right: 4, top: 1, bottom: 1 })
               .borderRadius(4)
               .backgroundColor('#59000000')

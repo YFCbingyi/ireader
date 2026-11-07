@@ -1,6 +1,6 @@
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { curves } from '@kit.ArkUI';
-import { ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
+import { AppSkin, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
 import { picker } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { BookMeta, BookType, GroupParams, ImportResult, ReaderParams } from '../model/BookModels';
@@ -59,6 +59,7 @@ struct Index {
   // 深色模式：EntryAbility 在创建与配置变更时写入，页面只做消费
   @StorageProp('systemColorMode') @Watch('onSystemColorModeChanged') systemColorMode: number =
     ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
+  @StorageProp('appSkin') @Watch('onAppSkinChanged') appSkin: string = AppSkin.GOLD;
   @State palette: ShelfThemeColors = ShelfTheme.light();
 
   private appContext(): common.UIAbilityContext {
@@ -69,15 +70,19 @@ struct Index {
     return this.systemColorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
   }
 
-  /** 只在配色真正变化时重建对象，避免每次渲染都传新对象导致整页重排 */
+  /** key 含皮肤 + 亮暗，换皮肤时底色不变也能触发重绘 */
   private applyPalette(): void {
-    const next = ShelfTheme.resolve(this.isSystemDark());
-    if (next.bg !== this.palette.bg) {
+    const next = ShelfTheme.resolve(this.isSystemDark(), this.appSkin);
+    if (next.key !== this.palette.key) {
       this.palette = next;
     }
   }
 
   private onSystemColorModeChanged(): void {
+    this.applyPalette();
+  }
+
+  private onAppSkinChanged(): void {
     this.applyPalette();
   }
 
@@ -787,7 +792,7 @@ struct Index {
               .fontSize(7)
               .lineHeight(9)
               .fontWeight(FontWeight.Medium)
-              .fontColor('#FFF8ED')
+              .fontColor(this.palette.coverInk)
               .maxLines(3)
               .textAlign(TextAlign.Center)
               .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -805,8 +810,8 @@ struct Index {
         .linearGradient({
           angle: 135,
           colors: this.groupPreviewIsImage(name, index)
-            ? [['#2C5F6E', 0.0], ['#3F8B99', 1.0]]
-            : [['#8B5E3C', 0.0], ['#B8860B', 1.0]]
+            ? [[this.palette.coverImageStart, 0.0], [this.palette.coverImageEnd, 1.0]]
+            : [[this.palette.coverTextStart, 0.0], [this.palette.coverTextEnd, 1.0]]
         })
       }
     }
@@ -1116,42 +1121,13 @@ struct Index {
     .height('100%')
   }
 
-  /** 设置按钮左侧的圆形「已下载」按钮：圆环内一个向下箭头 */
+  /** 设置按钮左侧的「已下载」按钮：次要操作，保留描边底，点按给出本机书架数量反馈 */
   @Builder
   downloadsButton() {
     Stack({ alignContent: Alignment.Center }) {
-      Circle()
-        .width(20)
-        .height(20)
-        .fillOpacity(0)
-        .stroke(this.palette.chipText)
-        .strokeWidth(1.5)
-
-      // 箭头竖杆
-      Column()
-        .width(1.6)
-        .height(9)
-        .borderRadius(1)
-        .backgroundColor(this.palette.chipText)
-        .translate({ x: 0, y: -1 })
-
-      // 箭头头部左斜杆
-      Column()
-        .width(1.6)
-        .height(6)
-        .borderRadius(1)
-        .backgroundColor(this.palette.chipText)
-        .rotate({ angle: 45 })
-        .translate({ x: -1.7, y: 1.7 })
-
-      // 箭头头部右斜杆
-      Column()
-        .width(1.6)
-        .height(6)
-        .borderRadius(1)
-        .backgroundColor(this.palette.chipText)
-        .rotate({ angle: -45 })
-        .translate({ x: 1.7, y: 1.7 })
+      SymbolGlyph($r('sys.symbol.arrow_down_circle'))
+        .fontSize(20)
+        .fontColor([this.palette.chipText])
     }
     .width(38)
     .height(38)
@@ -1160,35 +1136,42 @@ struct Index {
     .border({ width: 1, color: this.palette.border })
     .shadow({ radius: 8, color: this.palette.accentShadow, offsetX: 0, offsetY: 2 })
     .margin({ right: 8 })
+    .stateStyles({
+      normal: {
+        .scale({ x: 1, y: 1 })
+      },
+      pressed: {
+        .scale({ x: 0.92, y: 0.92 })
+      }
+    })
+    .animation({ curve: curves.springMotion() })
     .onClick(() => {
       this.toast(`已下载 ${this.books.length} 本，全部保存在本机书架`);
     })
   }
 
-  /** 右上角圆形设置按钮：四点图标，点开统一入口导入 TXT / 图片包 */
+  /** 右上角「导入」主按钮：主色实底与阅读页同款加号，点开 TXT / 图片包菜单 */
   @Builder
   importMenuButton() {
-    Column() {
-      Column({ space: 5 }) {
-        Row({ space: 5 }) {
-          Circle().width(5).height(5).fill(this.palette.chipText)
-          Circle().width(5).height(5).fill(this.palette.chipText)
-        }
-
-        Row({ space: 5 }) {
-          Circle().width(5).height(5).fill(this.palette.chipText)
-          Circle().width(5).height(5).fill(this.palette.chipText)
-        }
-      }
+    Stack({ alignContent: Alignment.Center }) {
+      SymbolGlyph($r('sys.symbol.plus'))
+        .fontSize(21)
+        .fontColor([this.palette.accentText])
     }
     .width(38)
     .height(38)
-    .justifyContent(FlexAlign.Center)
-    .alignItems(HorizontalAlign.Center)
     .borderRadius(19)
-    .backgroundColor(this.palette.chipBg)
-    .border({ width: 1, color: this.palette.border })
-    .shadow({ radius: 8, color: this.palette.accentShadow, offsetX: 0, offsetY: 2 })
+    .backgroundColor(this.palette.accent)
+    .shadow({ radius: 10, color: this.palette.accentShadow, offsetX: 0, offsetY: 3 })
+    .stateStyles({
+      normal: {
+        .scale({ x: 1, y: 1 })
+      },
+      pressed: {
+        .scale({ x: 0.92, y: 0.92 })
+      }
+    })
+    .animation({ curve: curves.springMotion() })
     .bindMenu(this.importMenu)
   }
 
