@@ -216,6 +216,13 @@ struct GroupBooks {
       return;
     }
     const oldName = this.group;
+    // 分组内只允许一种书：重命名到已有另一类书的分组名会让两类书混在一起
+    const ownType = LibraryStore.typeOfGroup(oldName);
+    const targetType = LibraryStore.typeOfGroup(name);
+    if (targetType.length > 0 && ownType.length > 0 && targetType !== ownType) {
+      this.toast(`「${name}」里已经是${LibraryStore.typeLabel(targetType)}，不能再放入${LibraryStore.typeLabel(ownType)}`);
+      return;
+    }
     LibraryStore.renameGroup(oldName, name);
     this.group = name;
     this.renameVisible = false;

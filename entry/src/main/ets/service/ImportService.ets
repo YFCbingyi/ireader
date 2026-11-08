@@ -14,7 +14,7 @@ import { NaturalSort } from '../utils/NaturalSort';
 import { ImageMetaReader } from './ImageMetaReader';
 import { LibraryStore } from './LibraryStore';
 import { TxtImportTask } from './TxtImportTask';
-import { EpubParser } from './EpubParser';
+import { EpubBook, EpubParser } from './EpubParser';
 
 const MAX_TEXT_BYTES = 50 * 1024 * 1024;
 const MAX_ZIP_ORIGINAL_BYTES = 2 * 1024 * 1024 * 1024;
@@ -52,13 +52,13 @@ export class ImportService {
     // 源文件先落到沙箱，TaskPool 只处理绝对路径（worker 内不可用 picker 授权的 uri 与 AppPaths）
     const sourcePath = `${bookDir}/source.txt`;
     try {
+      const title = ImportService.titleFromUri(uri);
       onProgress('复制文件', 0, 1);
       FileUtil.ensureDir(bookDir);
       FileUtil.copyUriToFile(uri, sourcePath);
       if (FileUtil.fileSize(sourcePath) <= 0) {
         throw new Error('文件为空');
       }
-      const title = ImportService.titleFromUri(uri);
       // 解析、切分与逐章写盘都在 TaskPool 内完成，不占用 UI 线程
       onProgress('解析章节', 0, 0);
       const parsed = await TxtImportTask.parse(sourcePath, `${bookDir}/text`, bookRel,
@@ -66,14 +66,21 @@ export class ImportService {
       if (parsed.chapters.length === 0) {
         throw new Error('未解析出任何章节');
       }
-      onProgress('写入书架', 0, 1);
       const manifest = new BookManifest();
       for (let i = 0; i < parsed.chapters.length; i++) {
         const item = parsed.chapters[i];
         manifest.chapters.push(ChapterMeta.text(item.title, item.relFile, item.charCount));
       }
+      // 指纹要看章节内容，只能等切分完成；命中就把本次解析出来的书目录整个丢掉
+      const fingerprint = ImportService.fingerprintOf(BookType.TEXT, manifest);
+      const existed = ImportService.findDuplicate(BookType.TEXT, manifest.chapters.length, fingerprint);
+      if (existed !== undefined) {
+        FileUtil.deleteRecursive(bookDir);
+        return ImportResult.duplicated(existed.id, existed.title);
+      }
+      onProgress('写入书架', 0, 1);
       LibraryStore.saveManifest(bookId, manifest);
-      const book = BookMeta.of(bookId, title, BookType.TEXT, manifest.chapters.length);
+      const book = BookMeta.of(bookId, title, BookType.TEXT, manifest.chapters.length, fingerprint);
       LibraryStore.saveBook(book);
       return ImportResult.ok(bookId, title, 0);
     } catch (e) {
@@ -90,6 +97,7 @@ export class ImportService {
     const bookDir = AppPaths.bookDir(bookId);
     const zipPath = `${bookDir}/source.zip`;
     const extractDir = `${bookDir}/content`;
+    const title = ImportService.titleFromUri(uri);
     try {
       const zipBytes = FileUtil.uriSize(uri);
       if (zipBytes > MAX_ZIP_ORIGINAL_BYTES) {
@@ -123,6 +131,13 @@ export class ImportService {
       }
       if (scans.length > MAX_CHAPTERS) {
         throw new Error('章节数量超过 1000');
+      }
+      // 查重放在读图片元数据之前：重复的包到这里就能确认，不必逐张读尺寸
+      const fingerprint = ImportService.fingerprintOfScans(scans);
+      const existed = ImportService.findDuplicate(BookType.IMAGE, scans.length, fingerprint);
+      if (existed !== undefined) {
+        FileUtil.deleteRecursive(bookDir);
+        return ImportResult.duplicated(existed.id, existed.title);
       }
       let totalImages = 0;
       for (let i = 0; i < scans.length; i++) {
@@ -161,8 +176,7 @@ export class ImportService {
 
       onProgress('生成章节', manifest.chapters.length, manifest.chapters.length);
       LibraryStore.saveManifest(bookId, manifest);
-      const title = ImportService.titleFromUri(uri);
-      const book = BookMeta.of(bookId, title, BookType.IMAGE, manifest.chapters.length);
+      const book = BookMeta.of(bookId, title, BookType.IMAGE, manifest.chapters.length, fingerprint);
       book.coverFile = manifest.chapters[0].images[0].file;
       LibraryStore.saveBook(book);
 
@@ -210,6 +224,7 @@ export class ImportService {
       if (parsed.chapters.length > MAX_CHAPTERS) {
         throw new Error('章节数量超过 1000');
       }
+      const title = parsed.title.length > 0 ? parsed.title : ImportService.titleFromUri(uri);
       const textDir = `${bookDir}/text`;
       FileUtil.ensureDir(textDir);
       const manifest = new BookManifest();
@@ -223,10 +238,16 @@ export class ImportService {
           onProgress('写入章节', i, parsed.chapters.length);
         }
       }
+      // 章节正文还在内存里，直接用内存算指纹，不必再回读磁盘；命中就丢掉本次解包目录
+      const fingerprint = ImportService.fingerprintOfEpub(parsed);
+      const existed = ImportService.findDuplicate(BookType.TEXT, manifest.chapters.length, fingerprint);
+      if (existed !== undefined) {
+        FileUtil.deleteRecursive(bookDir);
+        return ImportResult.duplicated(existed.id, existed.title);
+      }
       onProgress('写入书架', parsed.chapters.length, parsed.chapters.length);
       LibraryStore.saveManifest(bookId, manifest);
-      const title = parsed.title.length > 0 ? parsed.title : ImportService.titleFromUri(uri);
-      const book = BookMeta.of(bookId, title, BookType.TEXT, manifest.chapters.length);
+      const book = BookMeta.of(bookId, title, BookType.TEXT, manifest.chapters.length, fingerprint);
       book.coverFile = parsed.coverRel;
       LibraryStore.saveBook(book);
       // 原始 epub 不再需要；content/ 保留（封面图可能在这里）
@@ -369,6 +390,116 @@ export class ImportService {
     }
     result.sort((a: FolderBook, b: FolderBook): number => NaturalSort.compare(a.uri, b.uri));
     return result;
+  }
+
+  /**
+   * 书籍内容指纹：类型 + 章节数 + 总字数 + 首末章摘要。
+   *
+   * 为什么不是书名：同一本书的「连载版」和「完结版」书名一模一样，但章节数、总字数、末章都不同，
+   * 指纹必然不同，能正常导入；而同一份内容重复导入时这些字段完全一致，指纹相同，直接拦下。
+   * 只读首末两章，不必为查重把整本书再读一遍。
+   */
+  static fingerprintOf(type: BookType, manifest: BookManifest): string {
+    if (manifest.chapters.length === 0) {
+      return '';
+    }
+    let totalChars = 0;
+    let totalImages = 0;
+    for (let i = 0; i < manifest.chapters.length; i++) {
+      totalChars += manifest.chapters[i].charCount;
+      totalImages += manifest.chapters[i].images.length;
+    }
+    const first = manifest.chapters[0];
+    const last = manifest.chapters[manifest.chapters.length - 1];
+    let head = '';
+    let tail = '';
+    if (type === BookType.TEXT) {
+      head = FileUtil.hashText(FileUtil.readTextHead(ImportService.chapterPath(first.contentFile), 3000));
+      tail = FileUtil.hashText(FileUtil.readTextHead(ImportService.chapterPath(last.contentFile), 3000));
+    } else {
+      head = first.images.length > 0 ? first.images[0].file : '';
+      tail = last.images.length > 0 ? last.images[last.images.length - 1].file : '';
+    }
+    return ImportService.fingerprintOfParts(type, manifest.chapters.length, totalChars, totalImages,
+      head, tail);
+  }
+
+  /**
+   * EPUB 的指纹：解析结果还在内存里，直接拿正文算，省掉回读磁盘。
+   * 与 TXT 走同一套字段，同一种书（BookType.TEXT）之间可以直接比较。
+   */
+  private static fingerprintOfEpub(book: EpubBook): string {
+    if (book.chapters.length === 0) {
+      return '';
+    }
+    let totalChars = 0;
+    for (let i = 0; i < book.chapters.length; i++) {
+      totalChars += book.chapters[i].content.length;
+    }
+    const last = book.chapters[book.chapters.length - 1];
+    const head = FileUtil.hashText(book.chapters[0].content.substring(0, 3000));
+    const tail = FileUtil.hashText(last.content.substring(0, 3000));
+    return ImportService.fingerprintOfParts(BookType.TEXT, book.chapters.length, totalChars, 0,
+      head, tail);
+  }
+
+  private static fingerprintOfParts(type: BookType, chapterCount: number, totalChars: number,
+    totalImages: number, head: string, tail: string): string {
+    return FileUtil.hashText(`${type}|${chapterCount}|${totalChars}|${totalImages}|${head}|${tail}`);
+  }
+
+  /**
+   * 图片书指纹：扫描阶段就能算（章节数 + 图片总数 + 首末图文件名），
+   * 不必先读完几百张图的元数据，重复导入可以更早退出。
+   */
+  private static fingerprintOfScans(scans: ChapterScan[]): string {
+    if (scans.length === 0) {
+      return '';
+    }
+    let totalImages = 0;
+    for (let i = 0; i < scans.length; i++) {
+      totalImages += scans[i].images.length;
+    }
+    const first = scans[0];
+    const last = scans[scans.length - 1];
+    const head = first.images.length > 0 ? ImportService.baseName(first.images[0]) : '';
+    const tail = last.images.length > 0 ? ImportService.baseName(last.images[last.images.length - 1]) : '';
+    return FileUtil.hashText(
+      `${BookType.IMAGE}|${scans.length}|${totalImages}|${first.title}|${last.title}|${head}|${tail}`);
+  }
+
+  /** manifest 里的章节文件是相对沙箱根的路径，读文件前要补全 */
+  private static chapterPath(contentFile: string): string {
+    return AppPaths.abs(contentFile);
+  }
+
+  /**
+   * 内容指纹查重：命中就返回书架上的原书（不论它是否在分组里）。
+   * 历史书没有指纹，只有章节数相同时才值得补算（否则为每本旧书都读首末章太浪费）。
+   */
+  private static findDuplicate(type: BookType, chapterCount: number,
+    fingerprint: string): BookMeta | undefined {
+    if (fingerprint.length === 0) {
+      return undefined;
+    }
+    const books = LibraryStore.getBooks();
+    for (let i = 0; i < books.length; i++) {
+      const book = books[i];
+      if (book.type !== type || book.chapterCount !== chapterCount) {
+        continue;
+      }
+      let stored = book.contentHash ?? '';
+      if (stored.length === 0) {
+        stored = ImportService.fingerprintOf(book.type, LibraryStore.getManifest(book.id));
+        if (stored.length > 0) {
+          LibraryStore.setContentHash(book.id, stored);
+        }
+      }
+      if (stored.length > 0 && stored === fingerprint) {
+        return book;
+      }
+    }
+    return undefined;
   }
 
   /**

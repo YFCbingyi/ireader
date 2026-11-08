@@ -75,6 +75,12 @@ export class BookMeta {
   type: BookType = BookType.TEXT;
   coverFile: string = '';
   chapterCount: number = 0;
+  /**
+   * 内容指纹（导入查重用）：类型 + 章节数 + 首末章摘要的 MD5。
+   * 同名不同版（连载 vs 完结）指纹不同，可以正常导入；同一份内容重复导入会被拦下。
+   * 历史数据没有这个字段，首次查重时就地补算。
+   */
+  contentHash: string = '';
   /** 所属分组名，空串表示未分组 */
   group: string = '';
   // 阅读方向不再按书保存，统一存在 ReaderSettings.textReadingMode / imageReadingMode
@@ -82,12 +88,14 @@ export class BookMeta {
   createdAt: number = 0;
   updatedAt: number = 0;
 
-  static of(id: string, title: string, type: BookType, chapterCount: number): BookMeta {
+  static of(id: string, title: string, type: BookType, chapterCount: number,
+    contentHash: string = ''): BookMeta {
     const book = new BookMeta();
     book.id = id;
     book.title = title;
     book.type = type;
     book.chapterCount = chapterCount;
+    book.contentHash = contentHash;
     book.group = '';
     book.createdAt = Date.now();
     book.updatedAt = book.createdAt;
@@ -213,6 +221,8 @@ export class GroupParams {
 
 export class ImportResult {
   success: boolean = false;
+  /** 已存在（书名 + 类型命中书架或分组里的书）：跳过导入，已有书不做任何改动 */
+  duplicate: boolean = false;
   bookId: string = '';
   title: string = '';
   message: string = '';
@@ -231,6 +241,16 @@ export class ImportResult {
     const result = new ImportResult();
     result.success = false;
     result.message = message;
+    return result;
+  }
+
+  /** 书架上已有同一本书：bookId 指向原书，供「导入文件夹」把书架上的它并入同名分组 */
+  static duplicated(bookId: string, title: string): ImportResult {
+    const result = new ImportResult();
+    result.duplicate = true;
+    result.bookId = bookId;
+    result.title = title;
+    result.message = '书架已有这本书';
     return result;
   }
 }

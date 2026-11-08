@@ -1,5 +1,6 @@
 import { fileIo as fs, fileUri } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 
@@ -350,6 +351,27 @@ export class FileUtil {
       return parent + name;
     }
     return `${parent}/${name}`;
+  }
+
+  /**
+   * 字符串内容的 MD5（32 位十六进制）。
+   * 导入查重用的书籍指纹就是「类型 + 章节数 + 首末章摘要」拼成字符串后再取摘要。
+   */
+  static hashText(text: string): string {
+    try {
+      const md = cryptoFramework.createMd('MD5');
+      md.updateSync({ data: new util.TextEncoder().encodeInto(text) });
+      const digest = md.digestSync();
+      let hex = '';
+      for (let i = 0; i < digest.data.length; i++) {
+        hex += digest.data[i].toString(16).padStart(2, '0');
+      }
+      return hex;
+    } catch (e) {
+      const err = e as BusinessError;
+      hilog.error(DOMAIN, TAG, 'hashText failed: %{public}s', err.message);
+      return '';
+    }
   }
 
   static fileSize(path: string): number {
