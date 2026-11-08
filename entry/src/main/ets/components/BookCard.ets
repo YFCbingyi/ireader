@@ -1,37 +1,32 @@
 import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { ConfigurationConstant } from '@kit.AbilityKit';
-import { BookMeta, BookType } from '../model/BookModels';
-import { AppSkin, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
+import { BookMeta } from '../model/BookModels';
+import { ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
+import { BookCover } from './BookCover';
 
-// 封面书名文字区：字号 14，字体框宽度以实测为准
-const TITLE_FONT_SIZE = 14;
-const TITLE_LINE_HEIGHT = 20;
 // 封面下方的书名标签：字号 13，最多两行，行高固定以便同排卡片对齐
 const LABEL_FONT_SIZE = 13;
 const LABEL_LINE_HEIGHT = 17;
-
 
 @ComponentV2
 export struct BookCard {
   @Param book: BookMeta = new BookMeta();
   @Param selecting: boolean = false;
   @Param selected: boolean = false;
-  // 封面书名文字区实测宽度（vp），用来算每行能放几个字
-  @Local coverTextWidth: number = 0;
   // 封面下方书名标签的实测宽度（vp）
   @Local labelWidth: number = 0;
   @Event onOpen: (book: BookMeta) => void = (book: BookMeta): void => {};
   @Event onLongPress: (book: BookMeta) => void = (book: BookMeta): void => {};
   @Event onSelect: (book: BookMeta) => void = (book: BookMeta): void => {};
-  // 亮暗跟随系统、封面美术与卡片文字均跟随「我的 - 外观」皮肤
+  // 亮暗跟随系统、卡片文字跟随「我的 - 外观」皮肤
   // App 级环境（系统深浅色 / 皮肤）：@ComponentV2 不支持 @StorageProp，改用 @ObservedV2 单例
   @Local env: AppEnv = AppEnvStore.get();
   @Monitor('env.colorMode') onColorModeMonitor(): void {
-    this.onSystemColorModeChanged();
+    this.applyPalette();
   }
 
   @Monitor('env.appSkin') onSkinMonitor(): void {
-    this.onAppSkinChanged();
+    this.applyPalette();
   }
   @Local palette: ShelfThemeColors = ShelfTheme.light();
 
@@ -45,14 +40,6 @@ export struct BookCard {
     if (next.key !== this.palette.key) {
       this.palette = next;
     }
-  }
-
-  private onSystemColorModeChanged(): void {
-    this.applyPalette();
-  }
-
-  private onAppSkinChanged(): void {
-    this.applyPalette();
   }
 
   private displayTitle(): string {
@@ -97,8 +84,7 @@ export struct BookCard {
   }
 
   /**
-   * 封面书名排版：最多两行。
-   * 切点按实测宽度算，且末行不留 1~2 个字的孤字，
+   * 两行切分：切点按实测宽度算，且末行不留 1~2 个字的孤字，
    * 例如「工藤新一的日本后」切成「工藤新一的 / 日本后」，而不是「工藤新一的日 / 本后」。
    */
   private splitTitleLines(title: string, capacity: number): string[] {
@@ -115,11 +101,6 @@ export struct BookCard {
       return [head, rest];
     }
     return [head, `${this.fitPrefix(rest, capacity - 1)}…`];
-  }
-
-  private coverTitleLines(): string[] {
-    return this.splitTitleLines(this.displayTitle(),
-      this.lineCapacity(this.coverTextWidth, TITLE_FONT_SIZE, 12));
   }
 
   private labelTitleLines(): string[] {
@@ -147,124 +128,15 @@ export struct BookCard {
     this.onOpen(this.book);
   }
 
-  @Builder
-  bookCover() {
-    Row() {
-      Column()
-        .width(9)
-        .height('100%')
-        .linearGradient({
-          angle: 90,
-          colors: [['#66000000', 0.0], ['#2E000000', 0.55], ['#12000000', 1.0]]
-        })
-
-      Stack() {
-        if (this.book.type === BookType.IMAGE) {
-          Column()
-            .width('100%')
-            .height('100%')
-            .linearGradient({
-              angle: 135,
-              colors: [[this.palette.coverImageStart, 0.0], [this.palette.coverImageEnd, 1.0]]
-            })
-        } else {
-          Column()
-            .width('100%')
-            .height('100%')
-            .linearGradient({
-              angle: 135,
-              colors: [[this.palette.coverTextStart, 0.0], [this.palette.coverTextEnd, 1.0]]
-            })
-        }
-
-        Column()
-          .width('calc(100% - 12vp)')
-          .height('calc(100% - 12vp)')
-          .border({ width: 1, color: this.palette.coverInkSoft })
-          .borderRadius(6)
-
-        Column() {
-          ForEach(this.coverTitleLines(), (line: string, index: number) => {
-            Text(line)
-              .width('100%')
-              .fontSize(TITLE_FONT_SIZE)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.palette.coverInk)
-              .lineHeight(TITLE_LINE_HEIGHT)
-              .maxLines(1)
-              .textAlign(TextAlign.Center)
-          }, (line: string, index: number) => `title_${index}_${line}`)
-          Column()
-            .width(24)
-            .height(1)
-            .backgroundColor(this.palette.coverInkLine)
-            .margin({ top: 8 })
-        }
-        .width('100%')
-        .padding({ left: 6, right: 6 })
-        .justifyContent(FlexAlign.Center)
-        .alignItems(HorizontalAlign.Center)
-        .onAreaChange((oldValue: Area, newValue: Area) => {
-          const width = Number(newValue.width);
-          if (width > 0 && Math.abs(width - this.coverTextWidth) > 0.5) {
-            this.coverTextWidth = width;
-          }
-        })
-
-        if (!this.selecting) {
-          Stack({ alignContent: Alignment.TopEnd }) {
-            Text(this.book.type === BookType.IMAGE ? '图' : 'TXT')
-              .fontSize(9)
-              .fontColor(this.palette.coverInk)
-              .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-              .borderRadius(4)
-              .backgroundColor('#33FFFFFF')
-              .border({ width: 1, color: '#4DFFFFFF' })
-              .margin({ top: 6, right: 10 })
-          }
-          .width('100%')
-          .height('100%')
-          .hitTestBehavior(HitTestMode.Transparent)
-        }
-
-        if (this.book.group !== undefined && this.book.group.length > 0) {
-          Stack({ alignContent: Alignment.TopStart }) {
-            Text(this.book.group)
-              .fontSize(9)
-              .fontColor(this.palette.coverInk)
-              .padding({ left: 4, right: 4, top: 1, bottom: 1 })
-              .borderRadius(4)
-              .backgroundColor('#59000000')
-              .margin({ top: 6, left: 10 })
-              .maxLines(1)
-              .constraintSize({ maxWidth: 66 })
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
-          .width('100%')
-          .height('100%')
-          .hitTestBehavior(HitTestMode.Transparent)
-        }
-      }
-      .layoutWeight(1)
-      .height('100%')
-
-      Column()
-        .width(5)
-        .height('100%')
-        .backgroundColor(this.palette.surfaceSink)
-    }
-    .width('100%')
-    .aspectRatio(0.72)
-    .borderRadius(10)
-    .clip(true)
-    .draggable(false)
-    .shadow({ radius: 10, color: this.palette.shadow, offsetX: 0, offsetY: 4 })
-  }
-
   build() {
     Stack({ alignContent: Alignment.TopEnd }) {
       Column() {
-        this.bookCover()
+        // 封面与分组卡的 2×2 缩略封面共用同一套绘制逻辑
+        Column() {
+          BookCover({ book: this.book, showTypeBadge: !this.selecting })
+        }
+        .width('100%')
+        .aspectRatio(0.72)
 
         // 书名最多两行：切点按实测宽度算，末行不留孤字；固定两行高度保证同排卡片进度行对齐
         Column() {

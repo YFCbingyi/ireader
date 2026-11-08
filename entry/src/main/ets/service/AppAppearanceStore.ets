@@ -1,14 +1,19 @@
 import { AppSkin, AppSkinMeta } from '../model/ShelfTheme';
+import { CoverStyleMeta, ImageCoverStyle, TextCoverStyle } from '../model/CoverStyle';
 import { AppEnvStore } from '../model/AppEnv';
 import { AppPaths } from '../utils/AppPaths';
 import { FileUtil } from '../utils/FileUtil';
 
 /**
- * App 外观皮肤：独立于阅读器设置（settings.json）。
- * appSkin 通过 AppStorage 广播，所有使用 ShelfTheme 的组件即时换色。
+ * App 外观：独立于阅读器设置（settings.json）。
+ * 皮肤与封面样式都通过 AppEnv（@ObservedV2 单例）广播，所有使用 ShelfTheme 的组件即时生效。
  */
 export class AppAppearance {
   skin: string = AppSkin.GOLD;
+  /** 文本书封面样式（TextCoverStyle 值） */
+  textCover: string = TextCoverStyle.SPINE;
+  /** 图片书封面样式（ImageCoverStyle 值） */
+  imageCover: string = ImageCoverStyle.PHOTO;
 }
 
 export class AppAppearanceStore {
@@ -16,29 +21,53 @@ export class AppAppearanceStore {
     return `${AppPaths.getFilesDir()}/app_appearance.json`;
   }
 
-  /** 每个页面入口都会调 AppBootstrap.init，皮肤在此注入 AppStorage */
+  /** 每个页面入口都会调 AppBootstrap.init，外观在此注入 AppEnv */
   static init(): void {
-    AppEnvStore.get().appSkin = AppAppearanceStore.current();
+    const data = AppAppearanceStore.load();
+    const env = AppEnvStore.get();
+    env.appSkin = data.skin;
+    env.textCover = data.textCover;
+    env.imageCover = data.imageCover;
   }
 
-  static current(): string {
+  static load(): AppAppearance {
+    const data = new AppAppearance();
     const raw = FileUtil.readText(AppAppearanceStore.path());
     if (raw.length === 0) {
-      return AppSkin.GOLD;
+      return data;
     }
     try {
       const parsed = JSON.parse(raw) as AppAppearance;
-      return AppSkinMeta.normalize(parsed.skin !== undefined ? parsed.skin : AppSkin.GOLD);
+      data.skin = AppSkinMeta.normalize(parsed.skin !== undefined ? parsed.skin : AppSkin.GOLD);
+      data.textCover = CoverStyleMeta.normalizeText(
+        parsed.textCover !== undefined ? parsed.textCover : TextCoverStyle.SPINE);
+      data.imageCover = CoverStyleMeta.normalizeImage(
+        parsed.imageCover !== undefined ? parsed.imageCover : ImageCoverStyle.PHOTO);
+      return data;
     } catch (e) {
-      return AppSkin.GOLD;
+      return data;
     }
   }
 
-  static save(skin: string): void {
-    const normalized = AppSkinMeta.normalize(skin);
-    const data = new AppAppearance();
-    data.skin = normalized;
+  static saveSkin(skin: string): void {
+    const data = AppAppearanceStore.load();
+    data.skin = AppSkinMeta.normalize(skin);
+    AppAppearanceStore.persist(data);
+    AppEnvStore.get().appSkin = data.skin;
+  }
+
+  /** 封面样式：文本书与图片书分开存，只改传进来的那一项 */
+  static saveCovers(textCover: string, imageCover: string): void {
+    const data = AppAppearanceStore.load();
+    data.textCover = CoverStyleMeta.normalizeText(textCover);
+    data.imageCover = CoverStyleMeta.normalizeImage(imageCover);
+    AppAppearanceStore.persist(data);
+    const env = AppEnvStore.get();
+    env.textCover = data.textCover;
+    env.imageCover = data.imageCover;
+  }
+
+  private static persist(data: AppAppearance): void {
     FileUtil.writeTextAtomic(AppAppearanceStore.path(), JSON.stringify(data));
-    AppEnvStore.get().appSkin = normalized;
   }
 }

@@ -90,11 +90,11 @@ export class ShelfThemeColors {
   // 阴影
   shadow: string = '#33000000';
   accentShadow: string = '#1A8B5E3C';
-  // 书卡封面（渐变端点与封面上的文字/描边）；金棕默认值 = 原有封面配色
+  // 书卡封面（渐变端点与封面上的文字/描边）；默认值 = 金棕皮肤的暖棕 / 深棕
   coverTextStart: string = '#8B5E3C';
   coverTextEnd: string = '#B8860B';
-  coverImageStart: string = '#2C5F6E';
-  coverImageEnd: string = '#3F8B99';
+  coverImageStart: string = '#6B4A28';
+  coverImageEnd: string = '#A87C33';
   coverInk: string = '#FFF8ED';
   coverInkSoft: string = '#33FFF8ED';
   coverInkLine: string = '#66FFF8ED';
@@ -113,19 +113,28 @@ export class ShelfTheme {
   /** 四套皮肤各自的封面美术；金棕保留原渐变，其余皮肤在深色模式下略压暗 */
   private static applyCover(colors: ShelfThemeColors, skin: string, dark: boolean): void {
     if (skin === AppSkin.GOLD) {
+      // 金棕：文本封面保持暖棕 → 古金
+      colors.coverTextStart = '#8B5E3C';
+      colors.coverTextEnd = '#B8860B';
+      // 图片封面取同色系：深棕 → 铜金，压深一档与文本封面区分
+      colors.coverImageStart = dark ? '#54391E' : '#6B4A28';
+      colors.coverImageEnd = dark ? '#8A6726' : '#A87C33';
+      colors.coverInk = '#FFF8ED';
+      colors.coverInkSoft = '#33FFF8ED';
+      colors.coverInkLine = '#66FFF8ED';
       return;
     }
     if (skin === AppSkin.FESTIVE) {
       if (dark) {
         colors.coverTextStart = '#8E231D';
         colors.coverTextEnd = '#C4533A';
-        colors.coverImageStart = '#6E2C38';
-        colors.coverImageEnd = '#A24848';
+        colors.coverImageStart = '#6E2A22';
+        colors.coverImageEnd = '#A2432C';
       } else {
         colors.coverTextStart = '#A62B22';
         colors.coverTextEnd = '#D9643C';
-        colors.coverImageStart = '#8C3A46';
-        colors.coverImageEnd = '#C25B5B';
+        colors.coverImageStart = '#8E3126';
+        colors.coverImageEnd = '#C4553A';
       }
       colors.coverInk = '#FFF6F0';
       colors.coverInkSoft = '#33FFF6F0';
@@ -136,13 +145,13 @@ export class ShelfTheme {
       if (dark) {
         colors.coverTextStart = '#1F1F1F';
         colors.coverTextEnd = '#3A3A3A';
-        colors.coverImageStart = '#2A3038';
-        colors.coverImageEnd = '#46505C';
+        colors.coverImageStart = '#24262A';
+        colors.coverImageEnd = '#484C52';
       } else {
         colors.coverTextStart = '#2B2B2B';
         colors.coverTextEnd = '#4A4A4A';
-        colors.coverImageStart = '#3A4048';
-        colors.coverImageEnd = '#5B646E';
+        colors.coverImageStart = '#303338';
+        colors.coverImageEnd = '#5B5F66';
       }
       colors.coverInk = '#FFFFFF';
       colors.coverInkSoft = '#33FFFFFF';
@@ -153,13 +162,13 @@ export class ShelfTheme {
     if (dark) {
       colors.coverTextStart = '#2A55AC';
       colors.coverTextEnd = '#3F86D0';
-      colors.coverImageStart = '#244E78';
-      colors.coverImageEnd = '#3D88AB';
+      colors.coverImageStart = '#244A7C';
+      colors.coverImageEnd = '#3D7CB4';
     } else {
       colors.coverTextStart = '#2F6BD8';
       colors.coverTextEnd = '#4F9BE8';
-      colors.coverImageStart = '#2C5F8E';
-      colors.coverImageEnd = '#4FA3C7';
+      colors.coverImageStart = '#2A5C97';
+      colors.coverImageEnd = '#4F94D2';
     }
     colors.coverInk = '#FFFFFF';
     colors.coverInkSoft = '#33FFFFFF';

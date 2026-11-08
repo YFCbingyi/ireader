@@ -33,7 +33,7 @@ export class BackupService {
     payload.exportedAt = Date.now();
     payload.books = LibraryStore.getBooks();
     payload.settings = LibraryStore.getSettings();
-    payload.appSkin = AppAppearanceStore.current();
+    payload.appSkin = AppAppearanceStore.load().skin;
     payload.stats = ReadingStatsStore.get();
     for (let i = 0; i < payload.books.length; i++) {
       const bookId = payload.books[i].id;
