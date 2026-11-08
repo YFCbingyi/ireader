@@ -22,11 +22,26 @@ const MAX_ZIP_LABEL = '2GB';
 const MAX_CHAPTERS = 1000;
 const MAX_EPUB_BYTES = 500 * 1024 * 1024;
 const MAX_EPUB_LABEL = '500MB';
+// 文件夹扫描的目录数上限（防止误选超大目录时长时间卡在遍历上）
+const MAX_SCAN_DIRS = 60;
 
 export class ChapterScan {
   title: string = '';
   dir: string = '';
   images: string[] = [];
+}
+
+/** 文件夹扫描结果：一个可导入的书籍文件（kind 为扩展名：txt / epub / zip） */
+export class FolderBook {
+  uri: string = '';
+  kind: string = '';
+
+  static of(uri: string, kind: string): FolderBook {
+    const book = new FolderBook();
+    book.uri = uri;
+    book.kind = kind;
+    return book;
+  }
 }
 
 export class ImportService {
@@ -310,6 +325,87 @@ export class ImportService {
       return '未分章';
     }
     return rel.split('/').join(' · ');
+  }
+
+  /**
+   * 扫描文件夹（picker 选目录得到的授权 uri），递归收集其中的 txt / epub / zip，最多 limit 个。
+   *
+   * 子项一律在父级地址后拼名字而不是转成本地路径：picker 的读授权按 uri 前缀生效，
+   * 转成裸路径后越出授权范围会读不到文件。
+   * 目录数设上限，避免误选根目录这类超大目录时卡在扫描上。
+   */
+  static scanFolder(uri: string, limit: number): FolderBook[] {
+    const result: FolderBook[] = [];
+    if (limit <= 0 || uri.length === 0) {
+      return result;
+    }
+    const queue: string[] = [uri];
+    let visited = 0;
+    while (queue.length > 0 && result.length < limit && visited < MAX_SCAN_DIRS) {
+      const dir = queue[0];
+      queue.splice(0, 1);
+      visited++;
+      const names = FileUtil.listDir(dir);
+      for (let i = 0; i < names.length; i++) {
+        if (result.length >= limit) {
+          break;
+        }
+        const name = names[i];
+        if (ImportService.isIgnored(name)) {
+          continue;
+        }
+        const entry = FileUtil.joinEntry(dir, name);
+        if (FileUtil.isDirEntry(entry)) {
+          if (queue.length + visited < MAX_SCAN_DIRS) {
+            queue.push(entry);
+          }
+          continue;
+        }
+        const kind = ImportService.bookKindOf(name);
+        if (kind.length > 0) {
+          result.push(FolderBook.of(entry, kind));
+        }
+      }
+    }
+    result.sort((a: FolderBook, b: FolderBook): number => NaturalSort.compare(a.uri, b.uri));
+    return result;
+  }
+
+  /**
+   * 文件夹名：用于给「导入文件夹」进来的书籍建同名分组。
+   * 取地址最后一段（先解码、去掉 query 与末尾斜杠），去掉扩展名的规则不适用于目录。
+   */
+  static folderNameOf(uri: string): string {
+    let decoded = uri;
+    try {
+      decoded = decodeURIComponent(uri);
+    } catch (e) {
+      decoded = uri;
+    }
+    const query = decoded.indexOf('?');
+    if (query >= 0) {
+      decoded = decoded.substring(0, query);
+    }
+    let path = decoded;
+    while (path.length > 1 && path.endsWith('/')) {
+      path = path.substring(0, path.length - 1);
+    }
+    const index = path.lastIndexOf('/');
+    const name = index >= 0 ? path.substring(index + 1) : path;
+    return name.length > 0 ? name : '导入的书';
+  }
+
+  /** 可导入的书籍扩展名；返回空串表示不支持的格式 */
+  private static bookKindOf(name: string): string {
+    const dot = name.lastIndexOf('.');
+    if (dot < 0) {
+      return '';
+    }
+    const ext = name.substring(dot + 1).toLowerCase();
+    if (ext === 'txt' || ext === 'epub' || ext === 'zip') {
+      return ext;
+    }
+    return '';
   }
 
   private static isIgnored(name: string): boolean {

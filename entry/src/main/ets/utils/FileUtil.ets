@@ -1,4 +1,4 @@
-import { fileIo as fs } from '@kit.CoreFileKit';
+import { fileIo as fs, fileUri } from '@kit.CoreFileKit';
 import { util } from '@kit.ArkTS';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
@@ -311,6 +311,45 @@ export class FileUtil {
     } catch (e) {
       return false;
     }
+  }
+
+  /**
+   * 列目录名。目录可能来自 picker（file://docs/... 的授权 uri），也可能是沙箱路径，
+   * 两种形式都试一次：uri 形式优先（授权按 uri 前缀生效），失败再转本地路径。
+   */
+  static listDir(dir: string): string[] {
+    try {
+      return fs.listFileSync(dir);
+    } catch (e) {
+      try {
+        return fs.listFileSync(new fileUri.FileUri(dir).path);
+      } catch (e2) {
+        const err = e2 as BusinessError;
+        hilog.error(DOMAIN, TAG, 'listDir failed: %{public}s %{public}s', dir, err.message);
+        return [];
+      }
+    }
+  }
+
+  /** 目录项是子目录还是文件（同样兼容 picker uri 与沙箱路径） */
+  static isDirEntry(entry: string): boolean {
+    try {
+      return fs.statSync(entry).isDirectory();
+    } catch (e) {
+      try {
+        return fs.statSync(new fileUri.FileUri(entry).path).isDirectory();
+      } catch (e2) {
+        return false;
+      }
+    }
+  }
+
+  /** 拼接子项：父级保持原形式（uri 或路径），picker 目录下的子项用 uri 才能继承读授权 */
+  static joinEntry(parent: string, name: string): string {
+    if (parent.endsWith('/')) {
+      return parent + name;
+    }
+    return `${parent}/${name}`;
   }
 
   static fileSize(path: string): number {
