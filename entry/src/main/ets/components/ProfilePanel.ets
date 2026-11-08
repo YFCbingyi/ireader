@@ -34,6 +34,14 @@ export struct ProfilePanel {
   @Param topInset: number = 0;
   /** Index.onPageShow 递增，从阅读页返回时强制刷新统计 */
   @Param refreshTick: number = 0;
+  /**
+   * 换皮肤是否交给外层播"圆形揭示"：Index 会接管（扩散 → 盖满瞬间切皮肤 → 淡出），
+   * 没有人接管时就地直接换色。
+   */
+  @Param useSkinReveal: boolean = false;
+  /** 色卡点击回调：把皮肤 id 和点击位置（vp，窗口坐标）交给外层做揭示动画 */
+  @Event onSkinReveal: (skin: string, x: number, y: number) => void =
+    (skin: string, x: number, y: number): void => {};
   @Monitor('refreshTick') onRefreshTickWatch(): void {
     this.onRefreshTick();
   }
@@ -395,10 +403,21 @@ export struct ProfilePanel {
     AppAppearanceStore.saveMotionReduced(reduced);
   }
 
-  /** 选皮肤：落盘 + 广播 AppStorage，书架/发现/我的页立即换色，阅读页不受影响 */
-  private chooseSkin(skin: string): void {
-    AppAppearanceStore.saveSkin(skin);
+  /**
+   * 选皮肤：先收起弹层，再把「皮肤 id + 色卡点击位置」交给外层。
+   * 外层（Index）会从点击位置扩散一个圆形把整页盖住，盖满那一刻才真正换色，
+   * 所以整页不会出现"半新半旧"的过渡帧。
+   */
+  private chooseSkin(skin: string, x: number, y: number): void {
     this.skinPickerVisible = false;
+    if (skin === this.env.appSkin) {
+      return;
+    }
+    if (this.useSkinReveal) {
+      this.onSkinReveal(skin, x, y);
+      return;
+    }
+    AppAppearanceStore.saveSkin(skin);
     this.toast(`已切换为${Skins.label(skin)}`);
   }
 
@@ -1145,8 +1164,9 @@ export struct ProfilePanel {
             }
             .layoutWeight(1)
             .alignItems(HorizontalAlign.Center)
-            .onClick(() => {
-              this.chooseSkin(skin);
+            // 记下色卡的窗口坐标：圆形揭示要正好从这颗色卡长出来
+            .onClick((event: ClickEvent) => {
+              this.chooseSkin(skin, event.windowX, event.windowY);
             })
           }, (skin: string) => skin)
         }

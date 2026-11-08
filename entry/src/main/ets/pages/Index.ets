@@ -1,22 +1,35 @@
 import { AppEnv, AppEnvStore } from '../model/AppEnv';
+import { display } from '@kit.ArkUI';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { Motion } from '../theme/MotionTokens';
 import { Haptics } from '../utils/Haptics';
 import { ShelfTheme, ShelfThemeColors } from '../theme/ShelfTheme';
 import { picker } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { image } from '@kit.ImageKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BookMeta, BookType, GroupParams, ImportResult, ReaderParams } from '../model/BookModels';
 import { AppPaths } from '../utils/AppPaths';
 import { SelectionUtil } from '../utils/SelectionUtil';
 import { WindowUtil } from '../utils/WindowUtil';
 import { AppBootstrap } from '../service/AppBootstrap';
 import { LibraryStore } from '../service/LibraryStore';
+import { AppAppearanceStore } from '../service/AppAppearanceStore';
 import { BookSelectBar } from '../components/BookSelectBar';
 import { ImportService } from '../service/ImportService';
 import { BookCard } from '../components/BookCard';
 import { BookCover } from '../components/BookCover';
 import { DiscoverPanel } from '../components/DiscoverPanel';
 import { ProfilePanel } from '../components/ProfilePanel';
+
+// 换皮肤截图的根节点 id：必须与 build 根 Stack 上的 .id() 一致
+const SKIN_REVEAL_ROOT_ID = 'skin_reveal_root';
+// 换皮肤揭示的节奏：response 越大扩散越慢（0.55 偏快，0.9 从容）；damping 越小回弹越明显
+const SKIN_REVEAL_RESPONSE = 1.5;
+const SKIN_REVEAL_DAMPING = 0.8;
+// 旧截图的淡出：等洞扩到后段再开始，时长比扩散略短，收尾不拖
+const SKIN_REVEAL_FADE_DELAY = 460;
+const SKIN_REVEAL_FADE = 320;
 
 const TAB_BOOKSHELF = 0;
 const TAB_DISCOVER = 1;
@@ -48,6 +61,39 @@ class ImportItem {
     item.uri = uri;
     item.kind = kind;
     return item;
+  }
+}
+
+/**
+ * 书架网格里的一个单元：分组卡，或一本未分组的书。
+ *
+ * 两者混在同一个网格里，统一按「最近打开」倒序排列；分组卡自己的时间取
+ * 组内最近打开的那本书——这样刚读过的内容（不论有没有分组）都会落到最前面。
+ */
+class ShelfCell {
+  /** 非空表示这是一张分组卡 */
+  group: string = '';
+  /** 分组卡时留一本空书占位，避免字段可空 */
+  book: BookMeta = new BookMeta();
+  /** 排序键：书取自身最近打开时间，分组取组内最近打开时间 */
+  time: number = 0;
+
+  static ofBook(book: BookMeta): ShelfCell {
+    const cell = new ShelfCell();
+    cell.book = book;
+    cell.time = book.updatedAt;
+    return cell;
+  }
+
+  static ofGroup(name: string, time: number): ShelfCell {
+    const cell = new ShelfCell();
+    cell.group = name;
+    cell.time = time;
+    return cell;
+  }
+
+  isGroup(): boolean {
+    return this.group.length > 0;
   }
 }
 
@@ -127,6 +173,27 @@ struct Index {
     this.onAppSkinChanged();
   }
   @Local palette: ShelfThemeColors = ShelfTheme.light();
+  /*
+   * 换皮肤的圆形揭示：
+   *   1. 先把当前（旧皮肤）整页截成一张图盖在最上层；
+   *   2. 换皮肤——底下的真实页面瞬间变成新皮肤，被截图完全遮住；
+   *   3. 在截图遮罩上从点击处开洞并逐渐扩大，新皮肤从洞里铺开。
+   * 扩散的载体是真实界面（截图 + 挖洞），一整屏纯色覆盖只会被看成"屏闪一下"。
+   */
+  @Local skinRevealActive: boolean = false;
+  /** 洞的半径（vp）：0 → 屏幕对角线，逐帧重建遮罩路径 */
+  @Local skinRevealRadius: number = 0;
+  @Local skinRevealCenterX: number = 0;
+  @Local skinRevealCenterY: number = 0;
+  @Local skinRevealW: number = 0;
+  /** 旧截图的整体透明度：洞扩到后段时一起淡出，也是遮罩未生效时的保底 */
+  @Local skinRevealOpacity: number = 1;
+  @Local skinRevealH: number = 0;
+  /** 递增触发重建：PixelMap 是原生对象，不走 @Local 观测 */
+  @Local skinRevealShotVersion: number = 0;
+  private skinRevealShot: image.PixelMap | undefined = undefined;
+  /** 等待截图就位后再落盘的皮肤 id */
+  private skinRevealPending: string = '';
 
   private appContext(): common.UIAbilityContext {
     return this.getUIContext().getHostContext() as common.UIAbilityContext;
@@ -150,6 +217,109 @@ struct Index {
 
   private onAppSkinChanged(): void {
     this.applyPalette();
+  }
+
+  /**
+   * 遮罩路径：外圈矩形顺时针 + 内圈圆逆时针。
+   * 填充规则（nonzero 或 evenodd）下这套组合都会在中间留出一个真正的洞，
+   * 洞里的内容就是下面已经换成新皮肤的页面。
+   */
+  private revealMaskPath(): string {
+    const w = this.skinRevealW;
+    const h = this.skinRevealH;
+    const r = this.skinRevealRadius;
+    let commands = `M0 0 L${w} 0 L${w} ${h} L0 ${h} Z`;
+    if (r > 0.5) {
+      const cx = this.skinRevealCenterX;
+      const cy = this.skinRevealCenterY;
+      // 两段大弧拼整圆，sweep=0 是逆时针，正好和外圈方向相反
+      commands += ` M${cx - r} ${cy} A${r} ${r} 0 1 0 ${cx + r} ${cy} A${r} ${r} 0 1 0 ${cx - r} ${cy} Z`;
+    }
+    return commands;
+  }
+
+  /**
+   * 换皮肤的圆形揭示：
+   *   1. 把当前（旧皮肤）整页截成一张图盖在最上层；
+   *   2. 换皮肤——底下真实页面瞬间变成新皮肤，被截图完全遮住；
+   *   3. 用「外框 + 圆洞」的遮罩在截图上从点击处开洞，洞越开越大，新皮肤从这里铺开。
+   * 扩散的载体是真实界面（截图 + 挖洞），不会出现"整屏纯色闪一下"。
+   */
+  private startSkinReveal(skin: string, x: number, y: number): void {
+    if (this.skinRevealActive || skin === this.env.appSkin) {
+      return;
+    }
+    const ui = this.getUIContext();
+    const info = display.getDefaultDisplaySync();
+    const width = ui.px2vp(info.width);
+    const height = ui.px2vp(info.height);
+    this.skinRevealActive = true;
+    this.skinRevealPending = skin;
+    this.skinRevealCenterX = x;
+    this.skinRevealCenterY = y;
+    this.skinRevealW = width;
+    this.skinRevealH = height;
+    this.skinRevealRadius = 0;
+    this.skinRevealOpacity = 1;
+    // 外观弹层刚收起，等一帧让它彻底消失，否则会把弹层一起截进来
+    setTimeout(() => {
+      ui.getComponentSnapshot().get(SKIN_REVEAL_ROOT_ID).then((shot: image.PixelMap) => {
+        this.skinRevealShot = shot;
+        this.skinRevealShotVersion++;
+        // 截图与页面像素对齐，此刻换肤用户看不到底下正在重绘
+        AppAppearanceStore.saveSkin(this.skinRevealPending);
+        this.skinRevealPending = '';
+        // 下一帧再开洞：首帧必须让截图 1:1 铺满，才能和新皮肤严丝合缝
+        setTimeout(() => {
+          // 半径给到对角线：无论点在哪里，洞最终都能撑满整屏
+          const maxRadius = Math.sqrt(width * width + height * height);
+          const grow: AnimateParam = Motion.spring(SKIN_REVEAL_RESPONSE, SKIN_REVEAL_DAMPING);
+          grow.onFinish = () => {
+            // 兜底：无论遮罩是否生效，这一层都必须撤掉
+            this.finishSkinReveal();
+          };
+          ui.animateTo(grow, () => {
+            this.skinRevealRadius = maxRadius;
+          });
+          // 后段一起淡出：洞扩完时旧截图已经退得差不多了，收尾更软；
+          // 万一遮罩不生效，这也是一次交叉淡变，不会卡在全屏截图上
+          const fade: AnimateParam = {
+            duration: SKIN_REVEAL_FADE,
+            delay: SKIN_REVEAL_FADE_DELAY,
+            curve: Curve.EaseOut
+          };
+          ui.animateTo(fade, () => {
+            this.skinRevealOpacity = 0;
+          });
+        }, 16);
+      }).catch(() => {
+        // 截图不可用（组件不支持 / 截不到）：退化成瞬时切换，至少不会卡住
+        if (this.skinRevealPending.length > 0) {
+          AppAppearanceStore.saveSkin(this.skinRevealPending);
+          this.skinRevealPending = '';
+        }
+        this.finishSkinReveal();
+      });
+    }, 40);
+  }
+
+  private finishSkinReveal(): void {
+    this.skinRevealActive = false;
+    this.skinRevealRadius = 0;
+    this.skinRevealOpacity = 1;
+    this.skinRevealShotVersion = 0;
+    const shot = this.skinRevealShot;
+    this.skinRevealShot = undefined;
+    if (shot !== undefined) {
+      // 先让 UI 摘掉这张图，再释放原生内存，避免还在绘制时被回收
+      setTimeout(() => {
+        try {
+          shot.release();
+        } catch (e) {
+          hilog.debug(0x0006, 'Index', 'release skin snapshot failed');
+        }
+      }, 300);
+    }
   }
 
   aboutToAppear(): void {
@@ -219,6 +389,51 @@ struct Index {
       }
     }
     return result;
+  }
+
+  /**
+   * 网格里实际要画的单元：当前筛选下的分组卡与未分组的书混排，统一按最近打开倒序。
+   * 分组卡的时间取组内最近打开的那本书，所以「刚读过的分组」和「刚读过的书」
+   * 是按同一把尺子比较的，读一本书回来它会出现在书架上该在的位置。
+   */
+  private shelfCells(): ShelfCell[] {
+    const cells: ShelfCell[] = [];
+    const groupNames = this.visibleGroups();
+    for (let i = 0; i < groupNames.length; i++) {
+      cells.push(ShelfCell.ofGroup(groupNames[i], this.groupLatestTime(groupNames[i])));
+    }
+    const books = this.visibleBooks();
+    for (let i = 0; i < books.length; i++) {
+      cells.push(ShelfCell.ofBook(books[i]));
+    }
+    cells.sort((a: ShelfCell, b: ShelfCell): number => {
+      if (b.time !== a.time) {
+        return b.time - a.time;
+      }
+      // 同一时刻（比如批量导入）分组卡在前，避免书卡与分组卡来回跳
+      if (a.isGroup() !== b.isGroup()) {
+        return a.isGroup() ? -1 : 1;
+      }
+      return 0;
+    });
+    return cells;
+  }
+
+  /** 分组卡的排序键：组内最近打开的那本书的时间；空组返回 0 */
+  private groupLatestTime(group: string): number {
+    let latest = 0;
+    for (let i = 0; i < this.books.length; i++) {
+      const book = this.books[i];
+      if (book.group === group && book.updatedAt > latest) {
+        latest = book.updatedAt;
+      }
+    }
+    return latest;
+  }
+
+  /** 管理态下聚焦的那张卡：只有书会被聚焦，分组卡永远算「其余内容」 */
+  private cellFocused(cell: ShelfCell): boolean {
+    return this.managing && !cell.isGroup() && this.manageTargetId === cell.book.id;
   }
 
   /** 网格里实际要画的卡片数：当前筛选下的分组卡 + 未分组的书 */
@@ -1507,6 +1722,33 @@ struct Index {
     })
   }
 
+  /** 换皮肤的揭示层：盖一张「旧界面截图」，遮罩上从点击处开的洞越来越大 */
+  @Builder
+  skinRevealLayer() {
+    Stack({ alignContent: Alignment.TopStart }) {
+      if (this.skinRevealShot !== undefined && this.skinRevealShotVersion > 0) {
+        Image(this.skinRevealShot)
+          .width('100%')
+          .height('100%')
+          // 截图和页面的像素尺寸一致，Fill 才不会出现缩放缝
+          .objectFit(ImageFit.Fill)
+          .draggable(false)
+          .opacity(this.skinRevealOpacity)
+          // 洞外保留截图（旧皮肤），洞里露出下面已经切好的新皮肤
+          .maskShape(new Path({
+            width: this.skinRevealW,
+            height: this.skinRevealH,
+            commands: this.revealMaskPath()
+          }))
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .zIndex(100)
+    // 揭示期间吃掉点击，避免连点色卡触发第二次换肤
+    .hitTestBehavior(HitTestMode.Block)
+  }
+
   /** 骨架卡：与真实书卡同比例（封面 0.72 + 两行文字位） */
   @Builder
   skeletonCard() {
@@ -1858,70 +2100,71 @@ struct Index {
                     .height(this.topGapHeight())
                 }
               }, (index: number) => `top_gap_${index}`)
-              ForEach(this.visibleGroups(), (name: string) => {
+              // 分组卡与书卡混排：统一按最近打开倒序，分组卡的时间取组内最近打开的那本
+              ForEach(this.shelfCells(), (cell: ShelfCell) => {
                 GridItem() {
-                  this.groupGridCard(name)
+                  if (cell.isGroup()) {
+                    this.groupGridCard(cell.group)
+                  } else {
+                    Column() {
+                      BookCard({
+                        book: cell.book,
+                        selecting: this.selecting,
+                        selected: this.isSelected(cell.book.id),
+                        // 长按聚焦：只有这本的封面放大清晰，其余内容（含书名 / 进度）淡出
+                        focused: this.cellFocused(cell),
+                        onOpen: (book: BookMeta): void => {
+                          this.openBook(book);
+                        },
+                        onLongPress: (book: BookMeta): void => {
+                          if (this.selecting) {
+                            this.toggleSelect(book);
+                          } else {
+                            this.enterManage(book);
+                          }
+                        },
+                        onSelect: (book: BookMeta): void => {
+                          this.toggleSelect(book);
+                        }
+                      })
+                    }
+                    .width('100%')
+                  }
                 }
                 // 管理态下分组卡属于「其余内容」：与书卡一样雾化，否则只有书被处理、分组看着还是亮的
-                .blur(this.managing ? 8 : 0)
-                .opacity(this.managing ? 0.5 : 1)
-              }, (name: string) => `group_${name}_${this.groupCount(name)}`)
-              ForEach(this.visibleBooks(), (item: BookMeta) => {
-                GridItem() {
-                  Column() {
-                    BookCard({
-                      book: item,
-                      selecting: this.selecting,
-                      selected: this.isSelected(item.id),
-                      // 长按聚焦：只有这本的封面放大清晰，其余内容（含书名 / 进度）淡出
-                      focused: this.managing && this.manageTargetId === item.id,
-                      onOpen: (book: BookMeta): void => {
-                        this.openBook(book);
-                      },
-                      onLongPress: (book: BookMeta): void => {
-                        if (this.selecting) {
-                          this.toggleSelect(book);
-                        } else {
-                          this.enterManage(book);
-                        }
-                      },
-                      onSelect: (book: BookMeta): void => {
-                        this.toggleSelect(book);
-                      }
-                    })
-                  }
-                  .width('100%')
-                  // 聚焦卡的缩放交给 BookCard 内部的封面自己完成，这里只负责整页雾化
-                  .blur(this.managing && this.manageTargetId !== item.id ? 8 : 0)
-                  .opacity(this.managing && this.manageTargetId !== item.id ? 0.5 : 1)
-                  .zIndex(this.managing && this.manageTargetId === item.id ? 2 : 0)
-                  // 聚焦卡不加描边：封面已放大越出原格，描边会横穿封面；清晰度本身已足够区分
-                  .outline({
-                    width: 0,
-                    color: this.palette.accent,
-                    radius: 16
-                  })
-                  // 雾化 / 描边与封面放大共用同一条慢弹簧，进出管理态是一段连续过渡
-                  .animation(Motion.slow())
-                  .bindPopup(this.managing && this.manageTargetId === item.id
-                    && !this.groupSheetVisible && !this.newGroupVisible, {
-                    builder: this.bookActionMenu,
-                    placement: Placement.Bottom,
-                    popupColor: this.palette.surface,
-                    enableArrow: false,
-                    // 点外部即收起弹窗，再由 onStateChange 同步退出管理态。
-                    // 注意：autoCancel 为 false 时弹窗的遮障层会吞掉外部点击，页面里的 onClick 收不到。
-                    autoCancel: true,
-                    radius: 18,
-                    shadow: ShadowStyle.OUTER_DEFAULT_MD,
-                    onStateChange: (event) => {
-                      if (!event.isVisible && this.managing) {
-                        this.exitManage();
-                      }
+                .blur(this.managing && !this.cellFocused(cell) ? 8 : 0)
+                .opacity(this.managing && !this.cellFocused(cell) ? 0.5 : 1)
+                // 聚焦卡的缩放交给 BookCard 内部的封面自己完成，这里只负责整页雾化
+                .zIndex(this.cellFocused(cell) ? 2 : 0)
+                // 聚焦卡不加描边：封面已放大越出原格，描边会横穿封面；清晰度本身已足够区分
+                .outline({
+                  width: 0,
+                  color: this.palette.accent,
+                  radius: 16
+                })
+                // 雾化 / 描边与封面放大共用同一条慢弹簧，进出管理态是一段连续过渡
+                .animation(Motion.slow())
+                .bindPopup(this.cellFocused(cell)
+                  && !this.groupSheetVisible && !this.newGroupVisible, {
+                  builder: this.bookActionMenu,
+                  placement: Placement.Bottom,
+                  popupColor: this.palette.surface,
+                  enableArrow: false,
+                  // 点外部即收起弹窗，再由 onStateChange 同步退出管理态。
+                  // 注意：autoCancel 为 false 时弹窗的遮障层会吞掉外部点击，页面里的 onClick 收不到。
+                  autoCancel: true,
+                  radius: 18,
+                  shadow: ShadowStyle.OUTER_DEFAULT_MD,
+                  onStateChange: (event) => {
+                    if (!event.isVisible && this.managing) {
+                      this.exitManage();
                     }
-                  })
-                }
-              }, (item: BookMeta) => `${item.id}_${item.updatedAt}_${item.group}`)
+                  }
+                })
+                // key 里带排序时间：分组卡读了组内的书之后预览与位置都要跟着刷新
+              }, (cell: ShelfCell) => cell.isGroup()
+                ? `group_${cell.group}_${this.groupCount(cell.group)}_${cell.time}`
+                : `${cell.book.id}_${cell.book.updatedAt}_${cell.book.group}`)
             }
             .columnsTemplate('1fr 1fr 1fr')
             .columnsGap(12)
@@ -1947,7 +2190,12 @@ struct Index {
           ProfilePanel({
             bottomInset: this.bottomInset + 24,
             topInset: this.topGapHeight(),
-            refreshTick: this.profileRefresh
+            refreshTick: this.profileRefresh,
+            // 换皮肤交给本页播圆形揭示：色卡位置 → 圆的扩散 → 盖满瞬间换色
+            useSkinReveal: true,
+            onSkinReveal: (skin: string, x: number, y: number): void => {
+              this.startSkinReveal(skin, x, y);
+            }
           })
         }
       }
@@ -1968,7 +2216,14 @@ struct Index {
       if (this.importing) {
         this.importSkeleton()
       }
+
+      // 换皮肤的圆形揭示：盖一张"旧界面截图"，切肤后让它缩成一点，新皮肤从点击处铺开
+      if (this.skinRevealActive) {
+        this.skinRevealLayer()
+      }
     }
+    // 换皮肤时要截这一整块（含顶栏、内容、底部导航）
+    .id(SKIN_REVEAL_ROOT_ID)
     .width('100%')
     .height('100%')
     .backgroundColor(this.palette.bg)

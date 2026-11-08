@@ -82,6 +82,8 @@ struct GroupBooks {
         list.push(all[i]);
       }
     }
+    // 组内同样按最近打开时间倒序；getBooks 已排过，这里显式再排一次，不依赖上游顺序
+    list.sort((a: BookMeta, b: BookMeta): number => b.updatedAt - a.updatedAt);
     this.books = list;
   }
 
