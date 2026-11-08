@@ -1,4 +1,4 @@
-import { AppSkin, AppSkinMeta } from '../model/ShelfTheme';
+import { Skins } from '../theme/ShelfTheme';
 import { CoverStyleMeta, ImageCoverStyle, TextCoverStyle } from '../model/CoverStyle';
 import { AppEnvStore } from '../model/AppEnv';
 import { AppPaths } from '../utils/AppPaths';
@@ -9,7 +9,7 @@ import { FileUtil } from '../utils/FileUtil';
  * 皮肤与封面样式都通过 AppEnv（@ObservedV2 单例）广播，所有使用 ShelfTheme 的组件即时生效。
  */
 export class AppAppearance {
-  skin: string = AppSkin.GOLD;
+  skin: string = Skins.defaultId();
   /** 文本书封面样式（TextCoverStyle 值） */
   textCover: string = TextCoverStyle.SPINE;
   /** 图片书封面样式（ImageCoverStyle 值） */
@@ -38,7 +38,7 @@ export class AppAppearanceStore {
     }
     try {
       const parsed = JSON.parse(raw) as AppAppearance;
-      data.skin = AppSkinMeta.normalize(parsed.skin !== undefined ? parsed.skin : AppSkin.GOLD);
+      data.skin = Skins.normalize(parsed.skin !== undefined ? parsed.skin : Skins.defaultId());
       data.textCover = CoverStyleMeta.normalizeText(
         parsed.textCover !== undefined ? parsed.textCover : TextCoverStyle.SPINE);
       data.imageCover = CoverStyleMeta.normalizeImage(
@@ -51,7 +51,7 @@ export class AppAppearanceStore {
 
   static saveSkin(skin: string): void {
     const data = AppAppearanceStore.load();
-    data.skin = AppSkinMeta.normalize(skin);
+    data.skin = Skins.normalize(skin);
     AppAppearanceStore.persist(data);
     AppEnvStore.get().appSkin = data.skin;
   }

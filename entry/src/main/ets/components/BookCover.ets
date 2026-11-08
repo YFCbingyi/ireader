@@ -2,7 +2,7 @@ import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { ConfigurationConstant } from '@kit.AbilityKit';
 import { BookMeta, BookType } from '../model/BookModels';
 import { ImageCoverStyle, TextCoverStyle } from '../model/CoverStyle';
-import { ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
+import { ShelfTheme, ShelfThemeColors } from '../theme/ShelfTheme';
 import { AppPaths } from '../utils/AppPaths';
 
 // 经典书卷：封面书名文字区字号

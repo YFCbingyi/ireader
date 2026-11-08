@@ -1,7 +1,7 @@
 import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { BookMeta, GroupParams, ReaderParams } from '../model/BookModels';
-import { AppSkin, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
+import { ShelfTheme, ShelfThemeColors } from '../theme/ShelfTheme';
 import { SelectionUtil } from '../utils/SelectionUtil';
 import { WindowUtil } from '../utils/WindowUtil';
 import { AppBootstrap } from '../service/AppBootstrap';

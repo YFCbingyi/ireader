@@ -1,6 +1,6 @@
 import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { ConfigurationConstant } from '@kit.AbilityKit';
-import { AppSkin, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
+import { ShelfTheme, ShelfThemeColors } from '../theme/ShelfTheme';
 
 @ComponentV2
 export struct DiscoverPanel {
