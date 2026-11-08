@@ -2,14 +2,16 @@ import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { picker } from '@kit.CoreFileKit';
+import { Annotation } from '../model/Annotation';
 import { BookMeta, ReaderParams } from '../model/BookModels';
 import { CoverStyleMeta, ImageCoverStyle, TextCoverStyle } from '../model/CoverStyle';
 import { DailyReading } from '../model/ReadingStats';
 import { ShelfTheme, ShelfThemeColors, Skins } from '../theme/ShelfTheme';
+import { AnnotationStore } from '../service/AnnotationStore';
 import { AppBootstrap } from '../service/AppBootstrap';
 import { AppAppearanceStore } from '../service/AppAppearanceStore';
 import { BackupService } from '../service/BackupService';
-import { HabitSummary, HeatDay, HeatWeek, NoteEntry, NoteSummary, ProfileStats, ShelfSummary } from '../service/ProfileStats';
+import { HabitSummary, HeatDay, HeatWeek, NoteSummary, ProfileStats, ShelfSummary } from '../service/ProfileStats';
 import { LibraryStore } from '../service/LibraryStore';
 import { ReadingStatsStore } from '../service/ReadingStatsStore';
 import { FileUtil } from '../utils/FileUtil';
@@ -23,6 +25,8 @@ const KIND_PRIVACY = 2;
 const KIND_CLEAR = 3;
 const KIND_EXPORT = 4;
 const KIND_SKIN = 5;
+// 导出想法：把带想法的划线按书 / 章整理成 Markdown
+const KIND_EXPORT_NOTES = 6;
 
 @ComponentV2
 export struct ProfilePanel {
@@ -52,9 +56,8 @@ export struct ProfilePanel {
   // @Builder 按值传参不会随状态刷新，数值统一放状态数组，在 builder 内部按索引读取
   @Local statValues: string[] = ['0 天', '0 天', '0 本', '0 秒', '0 秒', '0 秒', '0 条', '0 条', '0 条'];
   @Local settingValues: string[] = ['统计中…', '', '应用沙箱', 'JSON 快照',
-    `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复', '金棕'];
+    `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复', '金棕', 'Markdown'];
   @Local noteSummary: NoteSummary = new NoteSummary();
-  @Local recentNotes: NoteEntry[] = [];
   @Local skinPickerVisible: boolean = false;
   // App 级环境（系统深浅色 / 皮肤）：@ComponentV2 不支持 @StorageProp，改用 @ObservedV2 单例
   @Local env: AppEnv = AppEnvStore.get();
@@ -68,10 +71,10 @@ export struct ProfilePanel {
   @Local palette: ShelfThemeColors = ShelfTheme.light();
 
   private settingLabels: string[] = ['本地占用', '数据明细', '存储位置', '导出备份',
-    '关于 ireader', '隐私说明', '清空阅读统计', 'App 主题'];
+    '关于 ireader', '隐私说明', '清空阅读统计', 'App 主题', '导出想法'];
   private settingKinds: number[] = [KIND_DATA, KIND_DATA, KIND_PRIVACY, KIND_EXPORT,
-    KIND_ABOUT, KIND_PRIVACY, KIND_CLEAR, KIND_SKIN];
-  private settingDanger: boolean[] = [false, false, false, false, false, false, true, false];
+    KIND_ABOUT, KIND_PRIVACY, KIND_CLEAR, KIND_SKIN, KIND_EXPORT_NOTES];
+  private settingDanger: boolean[] = [false, false, false, false, false, false, true, false, false];
   private continueBookId: string = '';
   private booksSnapshot: BookMeta[] = [];
   private slowTimer: number = -1;
@@ -152,7 +155,7 @@ export struct ProfilePanel {
 
   private refreshSettingValues(): void {
     this.settingValues = [this.storageText, this.shelfDetail, '应用沙箱', 'JSON 快照',
-      `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复', Skins.label(this.env.appSkin)];
+      `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复', Skins.label(this.env.appSkin), 'Markdown'];
   }
 
   private loadContinue(books: BookMeta[]): void {
@@ -187,19 +190,14 @@ export struct ProfilePanel {
         this.refreshSettingValues();
       }
       this.noteSummary = ProfileStats.notes(this.booksSnapshot);
-      this.recentNotes = this.noteSummary.recent;
       this.refreshStatValues();
     }, 150);
   }
 
-  /** 点最近笔记：带上章号与章内偏移，阅读页会直接落到划线位置 */
-  private async openNote(entry: NoteEntry): Promise<void> {
-    const params = new ReaderParams();
-    params.bookId = entry.bookId;
-    params.jumpChapter = entry.chapterIndex;
-    params.jumpOffset = entry.charOffset;
+  /** 点「我的笔记」卡片：进入独立详情页，划线 / 想法 / 书签分组展示 */
+  private async openNotesPage(): Promise<void> {
     try {
-      await this.getUIContext().getRouter().pushUrl({ url: 'pages/Reader', params: params });
+      await this.getUIContext().getRouter().pushUrl({ url: 'pages/Notes' });
     } catch (e) {
       const err = e as BusinessError;
       this.toast(`打开失败：${err.message}`);
@@ -226,6 +224,118 @@ export struct ProfilePanel {
         this.toast(`导出失败：${err.message}`);
       }
     }
+  }
+
+  /**
+   * 导出想法：把所有「带想法的划线」按书 → 章整理成 Markdown，每条含原文引用与想法正文。
+   * 纯划线没有想法，不进来；没有想法时直接提示，不弹保存框。
+   */
+  private async exportNotes(): Promise<void> {
+    let markdown = '';
+    try {
+      markdown = this.buildNotesMarkdown();
+    } catch (e) {
+      const err = e as BusinessError;
+      this.toast(`生成失败：${err.message}`);
+      return;
+    }
+    if (markdown.length === 0) {
+      this.toast('还没有想法可以导出，阅读时划选正文并写下想法即可');
+      return;
+    }
+    try {
+      const options = new picker.DocumentSaveOptions();
+      options.newFileNames = [`ireader-ideas-${ReadingStatsStore.todayKey()}.md`];
+      options.fileSuffixChoices = ['Markdown 文件|.md'];
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const docPicker = new picker.DocumentViewPicker(context);
+      const uris: string[] = await docPicker.save(options);
+      if (uris.length === 0) {
+        return;
+      }
+      FileUtil.writeUriText(uris[0], markdown);
+      this.toast('想法已导出为 Markdown 文件');
+    } catch (e) {
+      const err = e as BusinessError;
+      if (err.message !== undefined && err.message.length > 0) {
+        this.toast(`导出失败：${err.message}`);
+      }
+    }
+  }
+
+  /** 生成想法 Markdown 正文：无想法时返回空串 */
+  private buildNotesMarkdown(): string {
+    const books = LibraryStore.getBooks();
+    const body: string[] = [];
+    let total = 0;
+    for (let i = 0; i < books.length; i++) {
+      const book = books[i];
+      const annotations = AnnotationStore.load(book.id);
+      const picked: Annotation[] = [];
+      for (let j = 0; j < annotations.length; j++) {
+        if (annotations[j].note.trim().length > 0) {
+          picked.push(annotations[j]);
+        }
+      }
+      if (picked.length === 0) {
+        continue;
+      }
+      picked.sort((a: Annotation, b: Annotation): number => {
+        if (a.chapterIndex !== b.chapterIndex) {
+          return a.chapterIndex - b.chapterIndex;
+        }
+        return a.start - b.start;
+      });
+
+      const manifest = LibraryStore.getManifest(book.id);
+      const title = book.title.length > 0 ? book.title : '无题';
+      body.push(`## 《${title}》`);
+      body.push('');
+      let lastChapter = -1;
+      for (let k = 0; k < picked.length; k++) {
+        const item = picked[k];
+        if (item.chapterIndex !== lastChapter) {
+          lastChapter = item.chapterIndex;
+          const chapter = manifest.chapters[item.chapterIndex];
+          const chapterTitle = chapter !== undefined && chapter.title.length > 0
+            ? chapter.title
+            : `第 ${item.chapterIndex + 1} 章`;
+          body.push(`### ${chapterTitle}`);
+          body.push('');
+        }
+        body.push(`> ${this.quoteLine(item.text)}`);
+        body.push('');
+        body.push(`**想法**：${item.note.trim()}`);
+        body.push('');
+        body.push(`*${this.formatDateTime(item.createdAt)}*`);
+        body.push('');
+        total++;
+      }
+      body.push('---');
+      body.push('');
+    }
+    if (total === 0) {
+      return '';
+    }
+    const head: string[] = ['# 我的想法', '',
+      `导出于 ${ReadingStatsStore.todayKey()} · 共 ${total} 条`, ''];
+    return head.concat(body).join('\n');
+  }
+
+  /** 引文压成一行，避免多行原文把 Markdown 的引用块打散 */
+  private quoteLine(text: string): string {
+    const plain = text.split(new RegExp('\\s+')).join(' ').trim();
+    return plain.length > 0 ? plain : '（原文缺失）';
+  }
+
+  private pad2(value: number): string {
+    return value < 10 ? `0${value}` : `${value}`;
+  }
+
+  private formatDateTime(timestamp: number): string {
+    const date = new Date(timestamp);
+    return `${date.getFullYear()}-${this.pad2(date.getMonth() + 1)}-${this.pad2(date.getDate())} ` +
+      `${this.pad2(date.getHours())}:${this.pad2(date.getMinutes())}`;
   }
 
   private async openContinueBook(): Promise<void> {
@@ -269,11 +379,20 @@ export struct ProfilePanel {
       this.exportBackup();
       return;
     }
+    if (kind === KIND_EXPORT_NOTES) {
+      this.exportNotes();
+      return;
+    }
     if (kind === KIND_SKIN) {
       this.skinPickerVisible = true;
       return;
     }
     this.confirmClearStats();
+  }
+
+  /** 减弱动效：落盘 + 广播，所有走 MotionTokens 的弹簧立刻降级为短淡变 */
+  private setMotionReduced(reduced: boolean): void {
+    AppAppearanceStore.saveMotionReduced(reduced);
   }
 
   /** 选皮肤：落盘 + 广播 AppStorage，书架/发现/我的页立即换色，阅读页不受影响 */
@@ -657,6 +776,7 @@ export struct ProfilePanel {
     .border({ width: 1, color: this.palette.chipBg })
   }
 
+  /** 「我的笔记」摘要卡：只给三条计数，点整张卡片进详情页分组查看 */
   @Builder
   noteCard() {
     Column() {
@@ -665,9 +785,13 @@ export struct ProfilePanel {
           .fontSize(13)
           .fontColor(this.palette.subtleText)
         Blank()
-        Text(`${this.noteSummary.highlightCount + this.noteSummary.noteCount} 条记录`)
+        Text('查看全部')
           .fontSize(11)
           .fontColor(this.palette.subtleText)
+        Text('›')
+          .fontSize(15)
+          .fontColor(this.palette.subtleText)
+          .margin({ left: 4 })
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
@@ -680,72 +804,14 @@ export struct ProfilePanel {
         this.statCell('书签', 8)
       }
       .width('100%')
-      .height(50)
+      .height(56)
       .alignItems(VerticalAlign.Center)
-      .margin({ top: 8 })
+      .margin({ top: 4 })
 
-      if (this.recentNotes.length === 0) {
-        Text('划选正文即可添加划线或想法，记录会出现在这里。')
-          .width('100%')
-          .fontSize(12)
-          .fontColor(this.palette.subtleText)
-          .margin({ top: 12 })
-      } else {
-        Column() {
-          ForEach(this.recentNotes, (item: NoteEntry, index: number) => {
-            Column() {
-              if (index > 0) {
-                Divider().color(this.palette.chipBg)
-              }
-              Row() {
-                Text(item.kind === 1 ? '想法' : '划线')
-                  .fontSize(10)
-                  .fontColor(this.palette.accentText)
-                  .padding({ left: 6, right: 6, top: 2, bottom: 2 })
-                  .borderRadius(6)
-                  .backgroundColor(this.palette.accent)
-                Text(item.quote.length > 0 ? item.quote : '（无原文）')
-                  .fontSize(13)
-                  .fontColor(this.palette.text)
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  .layoutWeight(1)
-                  .margin({ left: 8 })
-                Text('›')
-                  .fontSize(15)
-                  .fontColor(this.palette.subtleText)
-              }
-              .width('100%')
-              .alignItems(VerticalAlign.Center)
-
-              Text(`${item.bookTitle} · 第 ${item.chapterIndex + 1} 章`)
-                .width('100%')
-                .fontSize(11)
-                .fontColor(this.palette.subtleText)
-                .maxLines(1)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-                .margin({ top: 6 })
-
-              if (item.note.length > 0) {
-                Text(`想法：${item.note}`)
-                  .width('100%')
-                  .fontSize(11)
-                  .fontColor(this.palette.chipText)
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  .margin({ top: 4 })
-              }
-            }
-            .width('100%')
-            .padding({ top: 12, bottom: 12 })
-            .onClick(() => {
-              this.openNote(item);
-            })
-          }, (item: NoteEntry) => `${item.id}_${item.quote}_${item.note}`)
-        }
+      Text('划线、想法、书签分三组查看，任一条都能直接跳回原文位置。')
         .width('100%')
-        .margin({ top: 6 })
-      }
+        .fontSize(11)
+        .fontColor(this.palette.subtleText)
     }
     .width('100%')
     .padding(20)
@@ -753,6 +819,9 @@ export struct ProfilePanel {
     .borderRadius(16)
     .backgroundColor(this.palette.surface)
     .border({ width: 1, color: this.palette.chipBg })
+    .onClick(() => {
+      this.openNotesPage();
+    })
   }
 
   @Builder
@@ -817,6 +886,8 @@ export struct ProfilePanel {
         this.settingRow(2)
         this.settingDivider()
         this.settingRow(3)
+        this.settingDivider()
+        this.settingRow(8)
       }
       .width('100%')
       .borderRadius(16)
@@ -1081,6 +1152,31 @@ export struct ProfilePanel {
         }
         .width('100%')
         .margin({ top: 22 })
+
+        // 减弱动效：阅读类应用的必备开关（弹簧统一降级为 120ms 淡变）
+        Row() {
+          Column() {
+            Text('减弱动效')
+              .fontSize(14)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.palette.text)
+            Text('关闭弹性回弹，改用短淡变')
+              .fontSize(11)
+              .fontColor(this.palette.subtleText)
+              .margin({ top: 3 })
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+
+          Toggle({ type: ToggleType.Switch, isOn: this.env.motionReduced })
+            .selectedColor(this.palette.accent)
+            .onChange((isOn: boolean) => {
+              this.setMotionReduced(isOn);
+            })
+        }
+        .width('100%')
+        .margin({ top: 20 })
+        .alignItems(VerticalAlign.Center)
 
         Divider()
           .color(this.palette.chipBg)

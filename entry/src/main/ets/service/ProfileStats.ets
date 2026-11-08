@@ -42,12 +42,17 @@ export class ShelfSummary {
   bookmarkFileCount: number = 0;
 }
 
-/** 最近笔记列表里的一行，点击后按 bookId + 章内偏移跳回原文 */
+/**
+ * 最近笔记列表里的一行，点击后按 bookId + 章内偏移跳回原文。
+ * kind：0 划线 / 1 想法 / 2 书签，三者共用一套列表。
+ */
 export class NoteEntry {
   id: string = '';
   bookId: string = '';
   bookTitle: string = '';
   chapterIndex: number = 0;
+  /** 章名：书签自带，划线 / 想法为空（避免为了一行副标题再逐本读 manifest） */
+  chapterTitle: string = '';
   charOffset: number = 0;
   kind: number = 0;
   quote: string = '';
@@ -59,7 +64,8 @@ export class NoteSummary {
   highlightCount: number = 0;
   noteCount: number = 0;
   bookmarkCount: number = 0;
-  recent: NoteEntry[] = [];
+  /** 三类记录的全量合集，按时间倒序；「我的笔记」按类型筛选后再截断展示 */
+  all: NoteEntry[] = [];
 }
 
 /** 「我的」页取数层：只做计算与读盘，UI 组件不直接碰日期换算 */
@@ -173,20 +179,44 @@ export class ProfileStats {
     return result;
   }
 
-  /** 逐书聚合划线 / 想法 / 书签，并按时间取最近 3 条笔记（读盘较多，调用方应异步调度） */
+  /**
+   * 逐书聚合划线 / 想法 / 书签，最近列表里三类各取若干条再按时间合并，
+   * 保证「我的笔记」能同时看到书签、想法、划线，而不是被某一种刷满。
+   * 读盘较多，调用方应异步调度。
+   */
   static notes(books: BookMeta[]): NoteSummary {
     const result = new NoteSummary();
-    const entries: NoteEntry[] = [];
+    const highlights: NoteEntry[] = [];
+    const notes: NoteEntry[] = [];
+    const bookmarks: NoteEntry[] = [];
     for (let i = 0; i < books.length; i++) {
       const book = books[i];
-      result.bookmarkCount += LibraryStore.getBookmarks(book.id).length;
+      const title = book.title.length > 0 ? book.title : '无题';
+
+      const bookmarkList = LibraryStore.getBookmarks(book.id);
+      result.bookmarkCount += bookmarkList.length;
+      for (let b = 0; b < bookmarkList.length; b++) {
+        const bookmark = bookmarkList[b];
+        const entry = new NoteEntry();
+        entry.id = bookmark.id;
+        entry.bookId = book.id;
+        entry.bookTitle = title;
+        entry.chapterIndex = bookmark.chapterIndex;
+        entry.chapterTitle = bookmark.chapterTitle;
+        entry.charOffset = bookmark.charOffset;
+        entry.kind = 2;
+        entry.quote = ProfileStats.snippet(bookmark.preview, 32);
+        entry.createdAt = bookmark.createdAt;
+        bookmarks.push(entry);
+      }
+
       const list = AnnotationStore.load(book.id);
       for (let j = 0; j < list.length; j++) {
         const annotation: Annotation = list[j];
         const entry = new NoteEntry();
         entry.id = annotation.id;
         entry.bookId = book.id;
-        entry.bookTitle = book.title.length > 0 ? book.title : '无题';
+        entry.bookTitle = title;
         entry.chapterIndex = annotation.chapterIndex;
         entry.charOffset = annotation.start;
         entry.kind = annotation.kind === AnnotationKind.NOTE ? 1 : 0;
@@ -195,16 +225,26 @@ export class ProfileStats {
         entry.createdAt = annotation.createdAt;
         if (entry.kind === 1) {
           result.noteCount++;
+          notes.push(entry);
         } else {
           result.highlightCount++;
+          highlights.push(entry);
         }
-        entries.push(entry);
       }
     }
-    entries.sort((a: NoteEntry, b: NoteEntry): number => b.createdAt - a.createdAt);
-    for (let i = 0; i < entries.length && result.recent.length < 3; i++) {
-      result.recent.push(entries[i]);
+
+    const all: NoteEntry[] = [];
+    for (let h = 0; h < highlights.length; h++) {
+      all.push(highlights[h]);
     }
+    for (let n = 0; n < notes.length; n++) {
+      all.push(notes[n]);
+    }
+    for (let b = 0; b < bookmarks.length; b++) {
+      all.push(bookmarks[b]);
+    }
+    all.sort((a: NoteEntry, b: NoteEntry): number => b.createdAt - a.createdAt);
+    result.all = all;
     return result;
   }
 

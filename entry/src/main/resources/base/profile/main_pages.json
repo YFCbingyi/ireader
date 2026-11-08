@@ -3,6 +3,7 @@
     "pages/Index",
     "pages/Reader",
     "pages/GroupBooks",
-    "pages/Profile"
+    "pages/Profile",
+    "pages/Notes"
   ]
 }
