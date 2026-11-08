@@ -1,7 +1,7 @@
 import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { curves } from '@kit.ArkUI';
-import { AppSkin, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
+import { ShelfTheme, ShelfThemeColors } from '../theme/ShelfTheme';
 import { picker } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { BookMeta, BookType, GroupParams, ImportResult, ReaderParams } from '../model/BookModels';

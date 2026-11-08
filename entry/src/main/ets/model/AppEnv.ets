@@ -1,6 +1,6 @@
 import { ConfigurationConstant } from '@kit.AbilityKit';
 import { ImageCoverStyle, TextCoverStyle } from './CoverStyle';
-import { AppSkin } from './ShelfTheme';
+import { Skins } from '../theme/ShelfTheme';
 
 /**
  * App 级环境状态（系统深浅色 / 前后台 / 皮肤）。
@@ -17,8 +17,8 @@ export class AppEnv {
   @Trace colorMode: number = ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT;
   /** 应用是否在前台 */
   @Trace appActive: boolean = true;
-  /** App 外壳皮肤（AppSkin 值） */
-  @Trace appSkin: string = AppSkin.GOLD;
+  /** App 外壳皮肤（theme/skins 里注册的 SkinTheme.id） */
+  @Trace appSkin: string = Skins.defaultId();
   /** 文本书封面样式（TextCoverStyle 值） */
   @Trace textCover: string = TextCoverStyle.SPINE;
   /** 图片书封面样式（ImageCoverStyle 值） */

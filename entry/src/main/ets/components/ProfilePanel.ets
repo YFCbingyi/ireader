@@ -5,7 +5,7 @@ import { picker } from '@kit.CoreFileKit';
 import { BookMeta, ReaderParams } from '../model/BookModels';
 import { CoverStyleMeta, ImageCoverStyle, TextCoverStyle } from '../model/CoverStyle';
 import { DailyReading } from '../model/ReadingStats';
-import { AppSkin, AppSkinMeta, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
+import { ShelfTheme, ShelfThemeColors, Skins } from '../theme/ShelfTheme';
 import { AppBootstrap } from '../service/AppBootstrap';
 import { AppAppearanceStore } from '../service/AppAppearanceStore';
 import { BackupService } from '../service/BackupService';
@@ -152,7 +152,7 @@ export struct ProfilePanel {
 
   private refreshSettingValues(): void {
     this.settingValues = [this.storageText, this.shelfDetail, '应用沙箱', 'JSON 快照',
-      `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复', AppSkinMeta.label(this.env.appSkin)];
+      `版本 ${APP_VERSION}`, '纯本地 · 无账号', '不可恢复', Skins.label(this.env.appSkin)];
   }
 
   private loadContinue(books: BookMeta[]): void {
@@ -280,7 +280,7 @@ export struct ProfilePanel {
   private chooseSkin(skin: string): void {
     AppAppearanceStore.saveSkin(skin);
     this.skinPickerVisible = false;
-    this.toast(`已切换为${AppSkinMeta.label(skin)}`);
+    this.toast(`已切换为${Skins.label(skin)}`);
   }
 
   /** 文本书封面：只改文本书这一项，弹层不关闭，方便连续对比 */
@@ -1049,13 +1049,13 @@ export struct ProfilePanel {
           .margin({ top: 8 })
 
         Row() {
-          ForEach(AppSkinMeta.options(), (skin: string) => {
+          ForEach(Skins.options(), (skin: string) => {
             Column() {
               Stack({ alignContent: Alignment.Center }) {
                 Circle()
                   .width(44)
                   .height(44)
-                  .fill(AppSkinMeta.swatch(skin))
+                  .fill(Skins.swatch(skin))
                   .stroke(this.env.appSkin === skin ? this.palette.accentText : this.palette.border)
                   .strokeWidth(this.env.appSkin === skin ? 3 : 1)
                 if (this.env.appSkin === skin) {
@@ -1067,7 +1067,7 @@ export struct ProfilePanel {
               .width(44)
               .height(44)
 
-              Text(AppSkinMeta.label(skin))
+              Text(Skins.label(skin))
                 .fontSize(12)
                 .fontColor(this.env.appSkin === skin ? this.palette.accent : this.palette.subText)
                 .margin({ top: 8 })

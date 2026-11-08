@@ -1,7 +1,7 @@
 import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { ConfigurationConstant } from '@kit.AbilityKit';
 import { BookMeta } from '../model/BookModels';
-import { ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
+import { ShelfTheme, ShelfThemeColors } from '../theme/ShelfTheme';
 import { BookCover } from './BookCover';
 
 // 封面下方的书名标签：字号 13，最多两行，行高固定以便同排卡片对齐
