@@ -2,6 +2,7 @@ import {
   BookMeta,
   Bookmark,
   BookManifest,
+  BookType,
   PageTurnMode,
   ReaderSettings,
   ReadingMode,
@@ -174,6 +175,66 @@ export class LibraryStore {
       }
     }
     return names;
+  }
+
+  /** 记录书籍内容指纹（导入查重用；历史数据在首次查重时补算后落到这里） */
+  static setContentHash(bookId: string, contentHash: string): void {
+    const books = LibraryStore.loadBooks();
+    if (books === undefined) {
+      return;
+    }
+    for (let i = 0; i < books.length; i++) {
+      if (books[i].id === bookId) {
+        if (books[i].contentHash === contentHash) {
+          return;
+        }
+        books[i].contentHash = contentHash;
+        LibraryStore.saveBooks(books);
+        return;
+      }
+    }
+  }
+
+  /** 分组内不允许混放的标记：同一分组只能是图书或文本书中的一种 */
+  static readonly MIXED_TYPE: string = 'mixed';
+
+  /** 一批书的统一类型：'' 表示空，MIXED_TYPE 表示图书与文本书混选，其余为 BookType 取值 */
+  static typeOfBooks(bookIds: string[]): string {
+    if (bookIds.length === 0) {
+      return '';
+    }
+    const books = LibraryStore.getBooks();
+    let type = '';
+    for (let i = 0; i < books.length; i++) {
+      if (bookIds.indexOf(books[i].id) < 0) {
+        continue;
+      }
+      if (type.length === 0) {
+        type = books[i].type;
+      } else if (type !== books[i].type) {
+        return LibraryStore.MIXED_TYPE;
+      }
+    }
+    return type;
+  }
+
+  /** 类型的中文名：分组约束与提示共用 */
+  static typeLabel(type: string): string {
+    return type === BookType.IMAGE ? '图书' : '文本书';
+  }
+
+  /** 分组内已有书的类型：'' 表示分组不存在或为空 */
+  static typeOfGroup(group: string): string {
+    if (group.length === 0) {
+      return '';
+    }
+    const books = LibraryStore.getBooks();
+    for (let i = 0; i < books.length; i++) {
+      if (books[i].group === group) {
+        return books[i].type;
+      }
+    }
+    return '';
   }
 
   /** 重命名分组：把所有属于 oldName 的书改到 newName */

@@ -60,6 +60,28 @@ function importKindOf(ext: string): number {
   return IMPORT_TXT;
 }
 
+/**
+ * 给「导入文件夹」挑一个不混书的分组名：
+ * 目标名已被另一类型的书占用时改用带后缀的名字，避免图片书与文本书并到一组。
+ */
+function freeGroupName(base: string, type: string): string {
+  const existing = LibraryStore.typeOfGroup(base);
+  if (existing.length === 0 || existing === type) {
+    return base;
+  }
+  const suffix = type === BookType.IMAGE ? '（图书）' : '（文本）';
+  let name = `${base}${suffix}`;
+  let index = 2;
+  while (true) {
+    const taken = LibraryStore.typeOfGroup(name);
+    if (taken.length === 0 || taken === type) {
+      return name;
+    }
+    name = `${base}${suffix}${index}`;
+    index++;
+  }
+}
+
 @Entry
 @ComponentV2
 struct Index {
@@ -307,6 +329,19 @@ struct Index {
     if (ids.length === 0) {
       this.closeGroupSheet();
       return;
+    }
+    // 分组内只允许一种书：图书与文本书不能混放（移出分组不受限制）
+    if (group.length > 0) {
+      const picked = LibraryStore.typeOfBooks(ids);
+      if (picked === LibraryStore.MIXED_TYPE) {
+        this.toast('图书与文本书不能放在同一个分组，请分开选择');
+        return;
+      }
+      const existing = LibraryStore.typeOfGroup(group);
+      if (existing.length > 0 && existing !== picked) {
+        this.toast(`「${group}」里已经是${LibraryStore.typeLabel(existing)}，不能再放入${LibraryStore.typeLabel(picked)}`);
+        return;
+      }
     }
     LibraryStore.setGroup(ids, group);
     this.closeGroupSheet();
@@ -605,10 +640,16 @@ struct Index {
     this.importing = true;
     this.importStage = '准备导入';
     let okCount = 0;
+    let dupCount = 0;
     let okTitle = '';
     let skippedImages = 0;
     let firstError = '';
-    const importedIds: string[] = [];
+    // 分组内不能混书：文本书与图书分别归组，两个分组名都从文件夹名派生
+    const textIds: string[] = [];
+    const imageIds: string[] = [];
+    // 「导入文件夹」时命中的书架旧书：不重复导入，但要把还没分组的挪进本次分组
+    const staleTextIds: string[] = [];
+    const staleImageIds: string[] = [];
     try {
       for (let i = 0; i < count; i++) {
         const item = items[i];
@@ -630,17 +671,53 @@ struct Index {
           okCount++;
           okTitle = result.title;
           skippedImages += result.skippedImages;
-          importedIds.push(result.bookId);
+          if (item.kind === IMPORT_ZIP) {
+            imageIds.push(result.bookId);
+          } else {
+            textIds.push(result.bookId);
+          }
+        } else if (result.duplicate) {
+          dupCount++;
+          okTitle = result.title;
+          // 只把"还在书架上（未分组）"的旧书挪进分组；已归到别的分组的保持原样，不破坏用户分类
+          const existing = LibraryStore.getBook(result.bookId);
+          if (existing !== undefined && existing.group.length === 0) {
+            if (item.kind === IMPORT_ZIP) {
+              staleImageIds.push(result.bookId);
+            } else {
+              staleTextIds.push(result.bookId);
+            }
+          }
         } else if (firstError.length === 0) {
           firstError = count > 1 ? `第 ${i + 1} 本：${result.message}` : result.message;
         }
       }
-      // 分组要写在 loadBooks 之前：书架的分组胶囊由 library.json 现算，先分组再刷新才能立刻看到
-      if (groupName.length > 0 && importedIds.length > 0) {
-        LibraryStore.setGroup(importedIds, groupName);
+      // 分组要写在 loadBooks 之前：书架的分组胶囊由 library.json 现算，先分组再刷新才能立刻看到。
+      // 两类都有书时图片书固定用「文件夹名（图书）」，避免与文本书分组同名
+      const usedGroups: string[] = [];
+      if (groupName.length > 0) {
+        const hasText = textIds.length > 0 || staleTextIds.length > 0;
+        const hasImage = imageIds.length > 0 || staleImageIds.length > 0;
+        if (hasText) {
+          const textGroup = freeGroupName(groupName, BookType.TEXT);
+          LibraryStore.setGroup(textIds, textGroup);
+          if (staleTextIds.length > 0) {
+            LibraryStore.setGroup(staleTextIds, textGroup);
+          }
+          usedGroups.push(textGroup);
+        }
+        if (hasImage) {
+          const baseName = hasText ? `${groupName}（图书）` : groupName;
+          const imageGroup = freeGroupName(baseName, BookType.IMAGE);
+          LibraryStore.setGroup(imageIds, imageGroup);
+          if (staleImageIds.length > 0) {
+            LibraryStore.setGroup(staleImageIds, imageGroup);
+          }
+          usedGroups.push(imageGroup);
+        }
       }
       this.loadBooks();
-      this.reportImportSummary(okCount, count, okTitle, skippedImages, firstError, groupName);
+      this.reportImportSummary(okCount, count, okTitle, skippedImages, firstError, usedGroups, dupCount);
     } finally {
       this.importing = false;
       this.importStage = '';
@@ -653,31 +730,42 @@ struct Index {
     }
   }
 
-  /** 多选导入的汇总提示：全成功只报数量，有失败时带首个失败原因；有分组时一并说明 */
+  /**
+   * 导入汇总提示：新导入 / 跳过已存在 / 失败 三类分别报数，
+   * 有分组时说明归到哪些分组（分组可能因类型不同而拆成两个）。
+   */
   private reportImportSummary(okCount: number, total: number, okTitle: string,
-    skippedImages: number, firstError: string, groupName: string = ''): void {
-    const groupHint: string = groupName.length > 0 && okCount > 0 ? `到分组「${groupName}」` : '';
+    skippedImages: number, firstError: string, usedGroups: string[] = [], dupCount: number = 0): void {
+    let groupHint = '';
+    if (usedGroups.length > 0) {
+      let names = '';
+      for (let i = 0; i < usedGroups.length; i++) {
+        names += `「${usedGroups[i]}」`;
+      }
+      groupHint = `，已归入分组${names}`;
+    }
+    const imageHint = skippedImages > 0 ? `，跳过 ${skippedImages} 张超大或损坏图片` : '';
     if (total <= 1) {
       if (okCount === 1) {
-        this.toast(skippedImages > 0
-          ? `已导入《${okTitle}》${groupHint}，跳过 ${skippedImages} 张超大或损坏图片`
-          : `已导入《${okTitle}》${groupHint}`);
-      } else {
-        this.toast(`导入失败：${firstError.length > 0 ? firstError : '未知错误'}`);
+        this.toast(`已导入《${okTitle}》${imageHint}${groupHint}`);
+        return;
       }
+      if (dupCount === 1) {
+        this.toast(`《${okTitle}》已导入过，已忽略${groupHint}`);
+        return;
+      }
+      this.toast(`导入失败：${firstError.length > 0 ? firstError : '未知错误'}`);
       return;
     }
-    if (okCount === total) {
-      this.toast(skippedImages > 0
-        ? `已导入 ${okCount} 本${groupHint}，跳过 ${skippedImages} 张超大或损坏图片`
-        : `已导入 ${okCount} 本${groupHint}`);
-      return;
+    const failed = total - okCount - dupCount;
+    let message = okCount > 0 ? `已导入 ${okCount} 本` : '没有导入新书';
+    if (dupCount > 0) {
+      message += `，跳过 ${dupCount} 本已导入`;
     }
-    if (okCount === 0) {
-      this.toast(`${total} 本均导入失败：${firstError.length > 0 ? firstError : '未知错误'}`);
-      return;
+    if (failed > 0) {
+      message += `，${failed} 本失败：${firstError.length > 0 ? firstError : '未知错误'}`;
     }
-    this.toast(`已导入 ${okCount} 本${groupHint}，${total - okCount} 本失败：${firstError}`);
+    this.toast(message + imageHint + groupHint);
   }
 
   /** 导入 EPUB：一次最多选 IMPORT_MAX_FILES 个，解包后按 spine 顺序抽成单章 txt */
