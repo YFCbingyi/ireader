@@ -3,6 +3,7 @@ import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { picker } from '@kit.CoreFileKit';
 import { BookMeta, ReaderParams } from '../model/BookModels';
+import { CoverStyleMeta, ImageCoverStyle, TextCoverStyle } from '../model/CoverStyle';
 import { DailyReading } from '../model/ReadingStats';
 import { AppSkin, AppSkinMeta, ShelfTheme, ShelfThemeColors } from '../model/ShelfTheme';
 import { AppBootstrap } from '../service/AppBootstrap';
@@ -277,9 +278,27 @@ export struct ProfilePanel {
 
   /** 选皮肤：落盘 + 广播 AppStorage，书架/发现/我的页立即换色，阅读页不受影响 */
   private chooseSkin(skin: string): void {
-    AppAppearanceStore.save(skin);
+    AppAppearanceStore.saveSkin(skin);
     this.skinPickerVisible = false;
     this.toast(`已切换为${AppSkinMeta.label(skin)}`);
+  }
+
+  /** 文本书封面：只改文本书这一项，弹层不关闭，方便连续对比 */
+  private chooseTextCover(style: string): void {
+    if (this.env.textCover === style) {
+      return;
+    }
+    AppAppearanceStore.saveCovers(style, this.env.imageCover);
+    this.toast(`书籍封面：${CoverStyleMeta.textLabel(style)}`);
+  }
+
+  /** 图片书封面：只改图片书这一项 */
+  private chooseImageCover(style: string): void {
+    if (this.env.imageCover === style) {
+      return;
+    }
+    AppAppearanceStore.saveCovers(this.env.textCover, style);
+    this.toast(`图书封面：${CoverStyleMeta.imageLabel(style)}`);
   }
 
   private showDataDialog(): void {
@@ -827,6 +846,184 @@ export struct ProfilePanel {
     .width('100%')
   }
 
+  /** 外观弹层里的迷你封面示意：只表达版式，不画真实书名 */
+  @Builder
+  coverSwatch(style: string, image: boolean) {
+    Stack({ alignContent: Alignment.Center }) {
+      if (image) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .linearGradient({
+            angle: 145,
+            colors: [[this.palette.coverImageStart, 0.0], [this.palette.coverImageEnd, 1.0]]
+          })
+        if (style === ImageCoverStyle.FILM) {
+          Text('图')
+            .fontSize(20)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#4DFFFFFF')
+          Column() {
+            Column()
+              .width('100%')
+              .height(4)
+              .backgroundColor('#59000000')
+            Blank()
+            Column()
+              .width('100%')
+              .height(4)
+              .backgroundColor('#59000000')
+          }
+          .width('100%')
+          .height('100%')
+        } else {
+          Stack({ alignContent: Alignment.Bottom }) {
+            Column()
+              .width('100%')
+              .height(22)
+              .linearGradient({ angle: 180, colors: [['#00000000', 0.0], ['#B3000000', 1.0]] })
+            Row() {
+              Column()
+                .width(18)
+                .height(2)
+                .backgroundColor('#FFFFFF')
+                .margin({ left: 5, bottom: 5 })
+              Blank()
+            }
+            .width('100%')
+            .height(22)
+            .alignItems(VerticalAlign.Bottom)
+          }
+          .width('100%')
+          .height('100%')
+        }
+      } else if (style === TextCoverStyle.SPINE) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .linearGradient({
+            angle: 175,
+            colors: this.env.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK
+              ? [[this.palette.surfaceSink, 0.0], [this.palette.surface, 1.0]]
+              : [[this.palette.coverInk, 0.0], [this.palette.coverInk, 0.5], [this.palette.chipBg, 1.0]]
+          })
+        Row() {
+          Column()
+            .width(8)
+            .height('100%')
+            .linearGradient({
+              angle: 90,
+              colors: [[this.palette.coverTextStart, 0.0], [this.palette.coverTextEnd, 1.0]]
+            })
+          Blank()
+        }
+        .width('100%')
+        .height('100%')
+        Column() {
+          Blank()
+          Column()
+            .width(14)
+            .height(1.5)
+            .backgroundColor(this.palette.coverTextStart)
+          Column()
+            .width(20)
+            .height(1.5)
+            .backgroundColor(this.palette.coverTextStart)
+            .margin({ top: 3 })
+          Column()
+            .width(11)
+            .height(1.5)
+            .backgroundColor(this.palette.coverTextStart)
+            .margin({ top: 3, bottom: 10 })
+        }
+        .width('100%')
+        .height('100%')
+        .padding({ left: 14, right: 6 })
+        .alignItems(HorizontalAlign.Start)
+      } else if (style === TextCoverStyle.TYPE) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .linearGradient({
+            angle: 150,
+            colors: [[this.palette.coverTextStart, 0.0], [this.palette.coverTextEnd, 1.0]]
+          })
+        Column() {
+          Blank()
+          Column()
+            .width(26)
+            .height(3)
+            .backgroundColor(this.palette.coverInk)
+          Column()
+            .width(18)
+            .height(3)
+            .backgroundColor(this.palette.coverInk)
+            .margin({ top: 4 })
+          Column()
+            .width(12)
+            .height(1.5)
+            .backgroundColor(this.palette.coverInkLine)
+            .margin({ top: 7, bottom: 9 })
+        }
+        .width('100%')
+        .height('100%')
+        .padding({ left: 6, right: 6 })
+        .alignItems(HorizontalAlign.Start)
+      } else if (style === TextCoverStyle.INK) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .linearGradient({
+            angle: 180,
+            colors: [[this.palette.surfaceAlt, 0.0], [this.palette.surface, 1.0]]
+          })
+        Column()
+          .width(1.5)
+          .height(26)
+          .backgroundColor(this.palette.text)
+          .margin({ top: -6 })
+        Row() {
+          Column()
+            .width(7)
+            .height(7)
+            .borderRadius(1)
+            .backgroundColor('#B23A2E')
+            .margin({ left: 6, bottom: 7 })
+          Blank()
+        }
+        .width('100%')
+        .height('100%')
+        .alignItems(VerticalAlign.Bottom)
+      } else {
+        Column()
+          .width('100%')
+          .height('100%')
+          .linearGradient({
+            angle: 135,
+            colors: [[this.palette.coverTextStart, 0.0], [this.palette.coverTextEnd, 1.0]]
+          })
+        Column()
+          .width('calc(100% - 8vp)')
+          .height('calc(100% - 8vp)')
+          .border({ width: 1, color: this.palette.coverInkSoft })
+          .borderRadius(3)
+        Column()
+          .width(16)
+          .height(1)
+          .backgroundColor(this.palette.coverInkLine)
+      }
+    }
+    .width(46)
+    .height(64)
+    .borderRadius(5)
+    .clip(true)
+    .border({
+      width: 2,
+      color: (image ? this.env.imageCover === style : this.env.textCover === style)
+        ? this.palette.accent : this.palette.border
+    })
+  }
+
   /** App 皮肤选择弹层：与阅读页「背景」面板互不影响 */
   @Builder
   skinPicker() {
@@ -884,6 +1081,73 @@ export struct ProfilePanel {
         }
         .width('100%')
         .margin({ top: 22 })
+
+        Divider()
+          .color(this.palette.chipBg)
+          .margin({ top: 20, bottom: 16 })
+
+        Text('书籍封面')
+          .width('100%')
+          .fontSize(14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.palette.text)
+        Text('文本书的封面版式，改完书架立刻生效')
+          .width('100%')
+          .fontSize(11)
+          .fontColor(this.palette.subtleText)
+          .margin({ top: 4 })
+
+        Row({ space: 6 }) {
+          ForEach(CoverStyleMeta.textOptions(), (style: string) => {
+            Column() {
+              this.coverSwatch(style, false)
+              Text(CoverStyleMeta.textLabel(style))
+                .fontSize(10)
+                .fontColor(this.env.textCover === style ? this.palette.accent : this.palette.subText)
+                .margin({ top: 6 })
+                .maxLines(1)
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Center)
+            .onClick(() => {
+              this.chooseTextCover(style);
+            })
+          }, (style: string) => `text_cover_${style}`)
+        }
+        .width('100%')
+        .margin({ top: 12 })
+
+        Text('图书封面')
+          .width('100%')
+          .fontSize(14)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(this.palette.text)
+          .margin({ top: 18 })
+        Text('图片书的封面版式')
+          .width('100%')
+          .fontSize(11)
+          .fontColor(this.palette.subtleText)
+          .margin({ top: 4 })
+
+        Row({ space: 6 }) {
+          ForEach(CoverStyleMeta.imageOptions(), (style: string) => {
+            Column() {
+              this.coverSwatch(style, true)
+              Text(CoverStyleMeta.imageLabel(style))
+                .fontSize(10)
+                .fontColor(this.env.imageCover === style ? this.palette.accent : this.palette.subText)
+                .margin({ top: 6 })
+                .maxLines(1)
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Center)
+            .onClick(() => {
+              this.chooseImageCover(style);
+            })
+          }, (style: string) => `image_cover_${style}`)
+        }
+        .width('100%')
+        .margin({ top: 12 })
       }
       .width('86%')
       .constraintSize({ maxWidth: 400 })

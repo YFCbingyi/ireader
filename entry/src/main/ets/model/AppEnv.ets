@@ -1,4 +1,5 @@
 import { ConfigurationConstant } from '@kit.AbilityKit';
+import { ImageCoverStyle, TextCoverStyle } from './CoverStyle';
 import { AppSkin } from './ShelfTheme';
 
 /**
@@ -18,6 +19,10 @@ export class AppEnv {
   @Trace appActive: boolean = true;
   /** App 外壳皮肤（AppSkin 值） */
   @Trace appSkin: string = AppSkin.GOLD;
+  /** 文本书封面样式（TextCoverStyle 值） */
+  @Trace textCover: string = TextCoverStyle.SPINE;
+  /** 图片书封面样式（ImageCoverStyle 值） */
+  @Trace imageCover: string = ImageCoverStyle.PHOTO;
 }
 
 /** 全局单例入口：所有组件与 Ability 共享同一实例 */

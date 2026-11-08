@@ -13,6 +13,7 @@ import { LibraryStore } from '../service/LibraryStore';
 import { BookSelectBar } from '../components/BookSelectBar';
 import { ImportService } from '../service/ImportService';
 import { BookCard } from '../components/BookCard';
+import { BookCover } from '../components/BookCover';
 import { DiscoverPanel } from '../components/DiscoverPanel';
 import { ProfilePanel } from '../components/ProfilePanel';
 
@@ -179,6 +180,25 @@ struct Index {
     return true;
   }
 
+  /**
+   * 当前筛选下要展示的分组：分组里放的是文本书就只在「文本」里出现，图书就只在「图书」里出现。
+   * 分组内类型唯一（导入与手动分组都做了约束），所以按组内第一本书的类型判断即可。
+   */
+  private visibleGroups(): string[] {
+    if (this.bookFilter === FILTER_ALL) {
+      return this.groups;
+    }
+    const wantText: boolean = this.bookFilter === FILTER_TEXT;
+    const result: string[] = [];
+    for (let i = 0; i < this.groups.length; i++) {
+      const type = LibraryStore.typeOfGroup(this.groups[i]);
+      if (wantText ? type === BookType.TEXT : type === BookType.IMAGE) {
+        result.push(this.groups[i]);
+      }
+    }
+    return result;
+  }
+
   /** 书架只展示未分组的书；已放入分组的书只在分组页面里出现 */
   private visibleBooks(): BookMeta[] {
     const result: BookMeta[] = [];
@@ -192,18 +212,19 @@ struct Index {
     return result;
   }
 
-  /** 网格里实际要画的卡片数：分组卡 + 未分组的书 */
+  /** 网格里实际要画的卡片数：当前筛选下的分组卡 + 未分组的书 */
   private gridCount(): number {
-    return this.groups.length + this.visibleBooks().length;
+    return this.visibleGroups().length + this.visibleBooks().length;
   }
 
+  /**
+   * 筛选徽标里的数量：按类型统计全部书籍（书架上的 + 分组里的）。
+   * 分组卡也算这个筛选下的内容，只数未分组的书会让徽标和眼前的卡片对不上。
+   */
   private countOf(filter: number): number {
     let total = 0;
     for (let i = 0; i < this.books.length; i++) {
       const book = this.books[i];
-      if (book.group !== undefined && book.group.length > 0) {
-        continue;
-      }
       if (filter === FILTER_TEXT && book.type !== BookType.TEXT) {
         continue;
       }
@@ -271,19 +292,15 @@ struct Index {
     return result;
   }
 
-  /** 分组卡预览格里的书名：不足位返回空串 */
-  private groupPreviewTitle(group: string, index: number): string {
+  /** 分组卡预览格里第 index 本书；不足位返回空书（缩略格留白） */
+  private groupBookAt(group: string, index: number): BookMeta {
     const list = this.groupBooks(group);
-    if (list.length <= index) {
-      return '';
-    }
-    return list[index].title.length === 0 ? '无题' : list[index].title;
+    return list.length > index ? list[index] : new BookMeta();
   }
 
-  /** 分组卡预览格是否画成图片书的配色 */
-  private groupPreviewIsImage(group: string, index: number): boolean {
-    const list = this.groupBooks(group);
-    return list.length > index && list[index].type === BookType.IMAGE;
+  /** 分组卡预览格是否有书占位 */
+  private hasGroupBook(group: string, index: number): boolean {
+    return this.groupBooks(group).length > index;
   }
 
   /** 长按单本：进入管理态，该书放大、其余雾化，书下方弹出操作项 */
@@ -317,6 +334,25 @@ struct Index {
     }
     this.newGroupName = '';
     this.groupSheetVisible = true;
+  }
+
+  /**
+   * 分组选择面板里可用的分组：只列与当前选中书同类型的分组，
+   * 免得点了才被「不能混放」拦下来。选中的书类型不一（或为空）时不做限制。
+   */
+  private groupOptions(): string[] {
+    const picked = LibraryStore.typeOfBooks(this.selectedIds);
+    if (picked.length === 0 || picked === LibraryStore.MIXED_TYPE) {
+      return this.groups;
+    }
+    const result: string[] = [];
+    for (let i = 0; i < this.groups.length; i++) {
+      const type = LibraryStore.typeOfGroup(this.groups[i]);
+      if (type.length === 0 || type === picked) {
+        result.push(this.groups[i]);
+      }
+    }
+    return result;
   }
 
   private closeGroupSheet(): void {
@@ -371,11 +407,8 @@ struct Index {
     this.applyGroup(name);
   }
 
-  /** 筛选后无书时的提示文案 */
+  /** 筛选后无内容时的提示文案（分组卡也算内容，不会被当成空态） */
   private emptyTitle(): string {
-    if (this.books.length > 0) {
-      return '书本都在分组里';
-    }
     if (this.bookFilter === FILTER_TEXT) {
       return '还没有文本书';
     }
@@ -386,11 +419,8 @@ struct Index {
   }
 
   private emptyHint(): string {
-    if (this.books.length > 0) {
-      return '点上面的分组卡片进去看';
-    }
     if (this.bookFilter === FILTER_TEXT) {
-      return '导入 TXT 文本后，会显示在这里';
+      return '导入 TXT 文本或 EPUB 后，会显示在这里';
     }
     if (this.bookFilter === FILTER_IMAGE) {
       return '导入 ZIP 图片包后，会显示在这里';
@@ -940,48 +970,12 @@ struct Index {
     .backgroundColor(this.palette.surface)
   }
 
-  /** 分组卡里的 2×2 封面缩略格：有书时画迷你封面（书脊 + 书名），不足 4 本的空位留白 */
+  /** 分组卡里的 2×2 封面缩略格：与书架卡片同一套封面绘制，只是按格子尺寸等比缩小；不足 4 本的空位留白 */
   @Builder
   groupCell(name: string, index: number) {
     Stack({ alignContent: Alignment.Center }) {
-      if (this.groupBooks(name).length > index) {
-        Row() {
-          // 书脊：右侧一本书越靠左越暗的压边
-          Column()
-            .width(2.5)
-            .height('100%')
-            .linearGradient({
-              angle: 90,
-              colors: [['#66000000', 0.0], ['#2E000000', 0.55], ['#12000000', 1.0]]
-            })
-
-          Column() {
-            Text(this.groupPreviewTitle(name, index))
-              .width('100%')
-              .fontSize(7)
-              .lineHeight(9)
-              .fontWeight(FontWeight.Medium)
-              .fontColor(this.palette.coverInk)
-              .maxLines(3)
-              .textAlign(TextAlign.Center)
-              .textOverflow({ overflow: TextOverflow.Ellipsis })
-          }
-          .layoutWeight(1)
-          .height('100%')
-          .padding({ left: 1, right: 1 })
-          .justifyContent(FlexAlign.Center)
-          .alignItems(HorizontalAlign.Center)
-        }
-        .width('100%')
-        .height('100%')
-        .borderRadius(3)
-        .clip(true)
-        .linearGradient({
-          angle: 135,
-          colors: this.groupPreviewIsImage(name, index)
-            ? [[this.palette.coverImageStart, 0.0], [this.palette.coverImageEnd, 1.0]]
-            : [[this.palette.coverTextStart, 0.0], [this.palette.coverTextEnd, 1.0]]
-        })
+      if (this.hasGroupBook(name, index)) {
+        BookCover({ book: this.groupBookAt(name, index), mini: true })
       }
     }
     .layoutWeight(1)
@@ -1178,7 +1172,7 @@ struct Index {
           GridItem() {
             this.newGroupTile()
           }
-          ForEach(this.groups, (name: string) => {
+          ForEach(this.groupOptions(), (name: string) => {
             GridItem() {
               this.groupTile(name)
             }
@@ -1591,7 +1585,7 @@ struct Index {
                     .height(this.topGapHeight())
                 }
               }, (index: number) => `top_gap_${index}`)
-              ForEach(this.groups, (name: string) => {
+              ForEach(this.visibleGroups(), (name: string) => {
                 GridItem() {
                   this.groupGridCard(name)
                 }
