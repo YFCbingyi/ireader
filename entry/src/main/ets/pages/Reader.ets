@@ -1451,12 +1451,26 @@ struct Reader {
     return this.book.type === BookType.IMAGE ? '#000000' : this.palette.bg;
   }
 
-  /** 控制栏上的胶囊 / 圆钮底色：深色主题与图片书用半透明白，浅色主题用配置里的 chip 色 */
-  private barChipBg(): string {
+  /**
+   * 控制栏的毛玻璃底：半透明的页面底色（图片书用半透明白）。
+   * 配合 backdropBlur，让正文透过控制栏时被柔化，与书架顶栏 / 底栏同一套观感。
+   */
+  private barGlassBg(): string {
     if (this.book.type === BookType.IMAGE) {
-      return '#33FFFFFF';
+      return '#4DFFFFFF';
     }
-    return this.palette.chipBg;
+    return this.withAlpha(this.palette.bg, this.isSystemDark() ? 'D9' : 'CC');
+  }
+
+  /** 给 #RRGGBB / #AARRGGBB 换一个透明度；非常规色值原样返回 */
+  private withAlpha(color: string, alpha: string): string {
+    if (color.length === 7 && color.startsWith('#')) {
+      return `#${alpha}${color.substring(1)}`;
+    }
+    if (color.length === 9 && color.startsWith('#')) {
+      return `#${alpha}${color.substring(3)}`;
+    }
+    return color;
   }
 
   /** 书籍本来就在书架里（阅读页只能从书架进入），这里给出明确反馈 */
@@ -1477,7 +1491,9 @@ struct Reader {
     .height(size)
     .justifyContent(FlexAlign.Center)
     .alignItems(VerticalAlign.Center)
-    .backgroundColor(this.barChipBg())
+    .backgroundColor(this.barGlassBg())
+    .backdropBlur(16)
+    .clip(true)
     .borderRadius(size / 2)
     .onClick(() => {
       action();
@@ -2015,7 +2031,9 @@ struct Reader {
           .width('100%')
           .height(58)
           .borderRadius(29)
-          .backgroundColor(this.barChipBg())
+          // 半透明底 + 背景模糊：正文透过来被柔化，与书架导航胶囊一致
+          .backgroundColor(this.barGlassBg())
+          .backdropBlur(18)
           .padding({ left: 4, right: 4 })
           .onClick(() => {
           })
