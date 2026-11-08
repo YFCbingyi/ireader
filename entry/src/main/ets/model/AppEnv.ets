@@ -23,6 +23,8 @@ export class AppEnv {
   @Trace textCover: string = TextCoverStyle.SPINE;
   /** 图片书封面样式（ImageCoverStyle 值） */
   @Trace imageCover: string = ImageCoverStyle.PHOTO;
+  /** 减弱动效：弹簧动画降级为 120ms 淡变（MotionTokens 统一读取） */
+  @Trace motionReduced: boolean = false;
 }
 
 /** 全局单例入口：所有组件与 Ability 共享同一实例 */

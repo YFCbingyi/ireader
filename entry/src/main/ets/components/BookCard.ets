@@ -1,6 +1,6 @@
 import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { ConfigurationConstant } from '@kit.AbilityKit';
-import { curves } from '@kit.ArkUI';
+import { Motion } from '../theme/MotionTokens';
 import { BookMeta } from '../model/BookModels';
 import { ShelfTheme, ShelfThemeColors } from '../theme/ShelfTheme';
 import { BookCover } from './BookCover';
@@ -8,8 +8,7 @@ import { BookCover } from './BookCover';
 // 封面下方的书名标签：字号 13，最多两行，行高固定以便同排卡片对齐
 const LABEL_FONT_SIZE = 13;
 const LABEL_LINE_HEIGHT = 17;
-// 聚焦 / 按压反馈的弹簧曲线：response 拉到 0.5，比默认明显更慢、回弹更足
-const PRESS_ANIM: AnimateParam = { curve: curves.springMotion(0.5, 0.82) };
+// 聚焦 / 按压反馈的弹簧由 MotionTokens.slow() 统一给出（response 0.5，比默认更慢、回弹更足）
 // 长按聚焦时封面的放大倍率（此时整页其余内容被雾化）
 const FOCUSED_COVER_SCALE = 1.18;
 // 手指按下的即时反馈倍率（还未越过长按阈值）
@@ -186,7 +185,7 @@ export struct BookCard {
                 })
                 .translate({ x: this.pressed || this.focused ? 16 : -14 })
                 .opacity(this.pressed || this.focused ? 1 : 0)
-                .animation(PRESS_ANIM)
+                .animation(Motion.slow())
                 .hitTestBehavior(HitTestMode.None)
             }
           }
@@ -203,7 +202,7 @@ export struct BookCard {
         })
         .translate({ y: this.coverLiftRatio() })
         .zIndex(this.focused && !this.selecting ? 5 : (this.pressed && !this.selecting ? 3 : 0))
-        .animation(PRESS_ANIM)
+        .animation(Motion.slow())
 
         // 书名最多两行：切点按实测宽度算，末行不留孤字；固定两行高度保证同排卡片进度行对齐
         Column() {

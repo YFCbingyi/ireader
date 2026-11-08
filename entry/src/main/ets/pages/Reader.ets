@@ -1,6 +1,8 @@
 import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
-import { curves, window } from '@kit.ArkUI';
+import { window } from '@kit.ArkUI';
+import { Motion } from '../theme/MotionTokens';
+import { Haptics } from '../utils/Haptics';
 import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import {
@@ -574,7 +576,7 @@ struct Reader {
 
   /** 从目录 / 笔记 / 搜索跳回原文：面板与控制栏一起收起，落位后即可直接翻页 */
   private enterReading(): void {
-    this.getUIContext().animateTo({ curve: curves.springMotion() }, () => {
+    this.getUIContext().animateTo(Motion.soft(), () => {
       this.panel = '';
       this.menuVisible = false;
       this.controlsVisible = false;
@@ -794,8 +796,12 @@ struct Reader {
     this.pullOffset = Math.min(offsetY, BOOKMARK_PULL_MAX);
     const reached: boolean = offsetY >= BOOKMARK_PULL_TRIGGER;
     if (reached !== this.pullReached) {
+      // 越过阈值给一次触觉：手指看不到丝带时也知道"已经够了"
+      if (reached) {
+        Haptics.tap();
+      }
       // 阈值跨越用弹簧过渡：丝带提亮 / 缩放 / 光晕是连续反馈，不是硬切
-      this.getUIContext().animateTo({ curve: curves.springMotion(0.32, 0.78) }, () => {
+      this.getUIContext().animateTo(Motion.quick(), () => {
         this.pullReached = reached;
       });
     }
@@ -919,7 +925,7 @@ struct Reader {
     .opacity(active ? 1 : 0.86)
     .scale({ x: active ? 1.06 : 1, y: active ? 1.06 : 1 })
     .transition(TransitionEffect.OPACITY.combine(TransitionEffect.scale({ x: 0.7, y: 0.7 }))
-      .animation({ curve: curves.springMotion(0.32, 0.78) }))
+      .animation(Motion.quick()))
   }
 
   /** 右上角书签丝带：下拉时随幅度拉长；平时已加书签是小丝带，未加且左右模式给下拉提示 */
@@ -1606,18 +1612,25 @@ struct Reader {
     return $r('sys.symbol.book_pages');
   }
 
+  /** 底部 tab 图标主色 */
+  private tabIconColor(name: string): string {
+    return this.panel === name ? this.palette.accent : this.barTextColor();
+  }
+
   @Builder
   bottomTab(label: string, name: string) {
     Column() {
+      // 分层设色：同一符号按层次拆两层，次层用主色降透明度，图形立刻有前后关系
       SymbolGlyph(this.tabSymbol(name))
         .fontSize(18)
-        .fontColor([this.panel === name ? this.palette.accent : this.barTextColor()])
+        .fontColor([this.tabIconColor(name), this.withAlpha(this.tabIconColor(name), '99')])
+        .renderingStrategy(SymbolRenderingStrategy.MULTIPLE_OPACITY)
         // 面板切换语义：选中项播放一次弹跳
         .symbolEffect(new BounceSymbolEffect(EffectScope.WHOLE), this.panel === name)
       Text(label)
         .fontSize(10)
         .margin({ top: 3 })
-        .fontColor(this.panel === name ? this.palette.accent : this.barTextColor())
+        .fontColor(this.tabIconColor(name))
         .opacity(this.panel === name ? 1 : 0.75)
     }
     .layoutWeight(1)
@@ -1644,14 +1657,14 @@ struct Reader {
   private toggleControls(): void {
     if (this.controlsVisible) {
       this.menuVisible = false;
-      this.getUIContext().animateTo({ curve: curves.springMotion() }, () => {
+      this.getUIContext().animateTo(Motion.soft(), () => {
         this.controlsVisible = false;
       });
       return;
     }
     this.updateProgressLabel();
     this.updateBookmarkState();
-    this.getUIContext().animateTo({ curve: curves.springMotion() }, () => {
+    this.getUIContext().animateTo(Motion.soft(), () => {
       this.controlsVisible = true;
     });
   }
@@ -2006,7 +2019,7 @@ struct Reader {
             .width('100%')
             // 显隐时从顶边滑入，与控制栏整体淡入叠加
             .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: -12 }))
-              .animation({ curve: curves.springMotion() }))
+              .animation(Motion.soft()))
           }
 
           // 控制栏显示时中间区域吞掉点击与滑动：既不翻页也不滚动，点击即退出控制栏
@@ -2039,7 +2052,7 @@ struct Reader {
           })
           // 显隐时从底边滑入
           .transition(TransitionEffect.OPACITY.combine(TransitionEffect.translate({ y: 16 }))
-            .animation({ curve: curves.springMotion() }))
+            .animation(Motion.soft()))
         }
         .width('100%')
         .height('100%')
@@ -2049,7 +2062,7 @@ struct Reader {
           this.tapControlsBackground();
         })
         // if 分支增删时整块淡入淡出，配合上下栏各自的滑入
-        .transition(TransitionEffect.OPACITY.animation({ curve: curves.springMotion() }))
+        .transition(TransitionEffect.OPACITY.animation(Motion.soft()))
       }
 
       // 设置按钮的下拉菜单：盖在控制栏之上，点空白处或再点按钮收起

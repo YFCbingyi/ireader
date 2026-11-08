@@ -14,6 +14,8 @@ export class AppAppearance {
   textCover: string = TextCoverStyle.SPINE;
   /** 图片书封面样式（ImageCoverStyle 值） */
   imageCover: string = ImageCoverStyle.PHOTO;
+  /** 减弱动效（无障碍 / 观感偏好）：true 后弹簧动画降级为短淡变 */
+  motionReduced: boolean = false;
 }
 
 export class AppAppearanceStore {
@@ -28,6 +30,7 @@ export class AppAppearanceStore {
     env.appSkin = data.skin;
     env.textCover = data.textCover;
     env.imageCover = data.imageCover;
+    env.motionReduced = data.motionReduced;
   }
 
   static load(): AppAppearance {
@@ -43,6 +46,7 @@ export class AppAppearanceStore {
         parsed.textCover !== undefined ? parsed.textCover : TextCoverStyle.SPINE);
       data.imageCover = CoverStyleMeta.normalizeImage(
         parsed.imageCover !== undefined ? parsed.imageCover : ImageCoverStyle.PHOTO);
+      data.motionReduced = parsed.motionReduced === true;
       return data;
     } catch (e) {
       return data;
@@ -67,7 +71,14 @@ export class AppAppearanceStore {
     env.imageCover = data.imageCover;
   }
 
+  /** 减弱动效开关：立即广播给所有用 MotionTokens 的组件 */
+  static saveMotionReduced(reduced: boolean): void {
+    const data = AppAppearanceStore.load();
+    data.motionReduced = reduced;
+    AppAppearanceStore.persist(data);
+    AppEnvStore.get().motionReduced = reduced;
+  }
+
   private static persist(data: AppAppearance): void {
     FileUtil.writeTextAtomic(AppAppearanceStore.path(), JSON.stringify(data));
-  }
-}
+  }}

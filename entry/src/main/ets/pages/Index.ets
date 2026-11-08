@@ -1,6 +1,7 @@
 import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
-import { curves } from '@kit.ArkUI';
+import { Motion } from '../theme/MotionTokens';
+import { Haptics } from '../utils/Haptics';
 import { ShelfTheme, ShelfThemeColors } from '../theme/ShelfTheme';
 import { picker } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -109,6 +110,12 @@ struct Index {
   @Local topBarHeight: number = 0;
   // 底部导航胶囊实测宽度：选中滑块按三等分定位
   @Local tabBarWidth: number = 0;
+  // 书架网格的滚动进度（量化到 1/12，避免每帧重建顶栏）：0 = 顶栏全透明，1 = 皮肤原生毛玻璃
+  @Local topBarReveal: number = 0;
+  private shelfScroller: Scroller = new Scroller();
+  // 循环动效的两个开关：onAppear 后翻一次，配合 iterations:-1 + Alternate 变成无限呼吸
+  @Local overlayPulse: boolean = false;
+  @Local illustrationBreath: boolean = false;
   // 深色模式：EntryAbility 在创建与配置变更时写入，页面只做消费
   // App 级环境（系统深浅色 / 皮肤）：@ComponentV2 不支持 @StorageProp，改用 @ObservedV2 单例
   @Local env: AppEnv = AppEnvStore.get();
@@ -311,6 +318,8 @@ struct Index {
     this.managing = true;
     this.manageTargetId = book.id;
     this.selectedIds = [book.id];
+    // 长按进入管理态是"模式切换"，给一次轻触确认
+    Haptics.tap();
   }
 
   private exitManage(): void {
@@ -452,6 +461,67 @@ struct Index {
     return this.topBarHeight > 0 ? this.topBarHeight : this.topInset + 130;
   }
 
+  /** 两位十六进制（ArkTS 没有 padStart 的隐式重载习惯，手写补零更稳） */
+  private hex2(value: number): string {
+    let alpha = Math.round(value);
+    if (alpha < 0) {
+      alpha = 0;
+    }
+    if (alpha > 255) {
+      alpha = 255;
+    }
+    const text = alpha.toString(16).toUpperCase();
+    return text.length === 1 ? `0${text}` : text;
+  }
+
+  /**
+   * 顶栏底色随滚动浮现：首屏完全透明（只留标题，页面更干净），
+   * 内容即将滑进顶栏时渐变到皮肤原生 barBg 的透明度，此时毛玻璃也一起打开。
+   * 只在书架页跟着网格走，其它 tab 内部自己滚动，直接给完全态。
+   */
+  private topBarBg(): string {
+    const base = this.palette.barBg;
+    if (this.currentTab !== TAB_BOOKSHELF) {
+      return base;
+    }
+    const hasAlpha = base.length === 9;
+    const rgb = hasAlpha ? base.substring(3) : base.substring(1);
+    const fullAlpha = hasAlpha ? Number.parseInt(base.substring(1, 3), 16) : 255;
+    return `#${this.hex2(fullAlpha * this.topBarReveal)}${rgb}`;
+  }
+
+  /** 顶栏毛玻璃开关：透明阶段不做背景模糊，省掉一次离屏渲染 */
+  private topBarBlur(): number {
+    return this.currentTab === TAB_BOOKSHELF && this.topBarReveal < 0.08 ? 0 : BLUR_RADIUS;
+  }
+
+  /** 滚动距离 → 顶栏浮现比例，量化成 12 档，既能跟手又不会每帧重建整棵顶栏 */
+  private updateTopBarReveal(offset: number): void {
+    const span = Math.max(80, this.topGapHeight() * 0.7);
+    let ratio = offset / span;
+    if (ratio < 0) {
+      ratio = 0;
+    }
+    if (ratio > 1) {
+      ratio = 1;
+    }
+    const stepped = Math.round(ratio * 12) / 12;
+    if (stepped !== this.topBarReveal) {
+      this.topBarReveal = stepped;
+    }
+  }
+
+  /**
+   * 循环呼吸参数：iterations:-1 + Alternate 让一次状态翻转变成无限循环。
+   * 减弱动效时 duration 归零，直接静态。
+   */
+  private pulseParam(duration: number): AnimateParam {
+    if (this.env.motionReduced) {
+      return { duration: 0 };
+    }
+    return { duration: duration, curve: Curve.EaseInOut, iterations: -1, playMode: PlayMode.Alternate };
+  }
+
   private toast(message: string): void {
     this.getUIContext().getPromptAction().showToast({ message: message });
   }
@@ -487,10 +557,12 @@ struct Index {
     }
     this.exitSelect();
     // 弹性过渡：导航切换用 springMotion 给出"落定"手感，不用固定 duration
-    this.getUIContext().animateTo({ curve: curves.springMotion(0.35, 0.85) }, () => {
+    this.getUIContext().animateTo(Motion.soft(), () => {
       this.currentTab = index;
     });
     if (index === TAB_BOOKSHELF) {
+      // 网格是 if 分支重建的，滚动位置回到顶部，顶栏也跟着回到透明态
+      this.topBarReveal = 0;
       this.loadBooks();
     }
   }
@@ -749,6 +821,10 @@ struct Index {
         }
       }
       this.loadBooks();
+      if (okCount > 0) {
+        // 导入完成是一次"结果到达"，比入场更该有触觉
+        Haptics.bump();
+      }
       this.reportImportSummary(okCount, count, okTitle, skippedImages, firstError, usedGroups, dupCount);
     } finally {
       this.importing = false;
@@ -1309,7 +1385,7 @@ struct Index {
         .scale({ x: 0.92, y: 0.92 })
       }
     })
-    .animation({ curve: curves.springMotion() })
+    .animation(Motion.soft())
     .onClick(() => {
       this.toast(`已下载 ${this.books.length} 本，全部保存在本机书架`);
     })
@@ -1336,7 +1412,7 @@ struct Index {
         .scale({ x: 0.92, y: 0.92 })
       }
     })
-    .animation({ curve: curves.springMotion() })
+    .animation(Motion.soft())
     .bindMenu(this.importMenu)
   }
 
@@ -1362,9 +1438,163 @@ struct Index {
     }
   }
 
+  /**
+   * 空态插画：一本摊开的书（两页绕内侧边微微立起 + 中缝 + 三条书页线）。
+   * 整块做 2.8s 的 1↔1.03 呼吸，空页面不再是一堆静态文字的冷清感。
+   */
+  @Builder
+  emptyIllustration() {
+    Stack({ alignContent: Alignment.Center }) {
+      Circle()
+        .width(136)
+        .height(136)
+        .fill(this.palette.chipBg)
+        .opacity(0.75)
+
+      // 左页：绕右边（中缝）转出一点角度，再用位移把中缝对到中心
+      Column() {
+        Column().width('62%').height(2).borderRadius(1)
+          .backgroundColor(this.palette.border).margin({ top: 20 })
+        Column().width('46%').height(2).borderRadius(1)
+          .backgroundColor(this.palette.border).margin({ top: 9 })
+        Column().width('54%').height(2).borderRadius(1)
+          .backgroundColor(this.palette.border).margin({ top: 9 })
+      }
+      .width(46)
+      .height(66)
+      .alignItems(HorizontalAlign.Center)
+      .backgroundColor(this.palette.surface)
+      .border({ width: 1, color: this.palette.border })
+      .borderRadius({ topLeft: 8, bottomLeft: 8, topRight: 3, bottomRight: 3 })
+      .rotate({ angle: 7, centerX: '100%', centerY: '50%' })
+      .translate({ x: -23 })
+
+      // 右页：镜像
+      Column() {
+        Column().width('62%').height(2).borderRadius(1)
+          .backgroundColor(this.palette.border).margin({ top: 26 })
+        Column().width('46%').height(2).borderRadius(1)
+          .backgroundColor(this.palette.border).margin({ top: 9 })
+        Column().width('54%').height(2).borderRadius(1)
+          .backgroundColor(this.palette.border).margin({ top: 9 })
+      }
+      .width(46)
+      .height(66)
+      .alignItems(HorizontalAlign.Center)
+      .backgroundColor(this.palette.surface)
+      .border({ width: 1, color: this.palette.border })
+      .borderRadius({ topLeft: 3, bottomLeft: 3, topRight: 8, bottomRight: 8 })
+      .rotate({ angle: -7, centerX: '0%', centerY: '50%' })
+      .translate({ x: 23 })
+
+      // 中缝
+      Column()
+        .width(2)
+        .height(64)
+        .borderRadius(1)
+        .backgroundColor(this.palette.border)
+    }
+    .width(136)
+    .height(120)
+    .margin({ bottom: 26 })
+    .scale({
+      x: this.illustrationBreath ? 1.03 : 1,
+      y: this.illustrationBreath ? 1.03 : 1
+    })
+    .animation(this.pulseParam(2800))
+    .onAppear(() => {
+      this.illustrationBreath = true;
+    })
+  }
+
+  /** 骨架卡：与真实书卡同比例（封面 0.72 + 两行文字位） */
+  @Builder
+  skeletonCard() {
+    Column() {
+      Column()
+        .width('100%')
+        .aspectRatio(0.72)
+        .borderRadius(10)
+        .backgroundColor(this.palette.chipBg)
+      Column()
+        .width('70%')
+        .height(10)
+        .borderRadius(5)
+        .backgroundColor(this.palette.chipBg)
+        .margin({ top: 10 })
+        .alignSelf(ItemAlign.Start)
+      Column()
+        .width('45%')
+        .height(8)
+        .borderRadius(4)
+        .backgroundColor(this.palette.chipBg)
+        .margin({ top: 7 })
+        .alignSelf(ItemAlign.Start)
+    }
+    .layoutWeight(1)
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  /**
+   * 导入骨架屏：用页面底色盖住书架，铺两排灰卡 + 整块呼吸。
+   * 比原来的「黑底 + 一个转圈」轻得多：用户看到的是"书架正在长出来"。
+   */
+  @Builder
+  importSkeleton() {
+    Column() {
+      Column()
+        .width('100%')
+        .height(Math.max(0, this.topGapHeight() - 16))
+
+      Column({ space: 24 }) {
+        Row({ space: 12 }) {
+          ForEach([0, 1, 2], (index: number) => {
+            this.skeletonCard()
+          }, (index: number) => `skeleton_a_${index}`)
+        }
+        .width('100%')
+        Row({ space: 12 }) {
+          ForEach([0, 1, 2], (index: number) => {
+            this.skeletonCard()
+          }, (index: number) => `skeleton_b_${index}`)
+        }
+        .width('100%')
+      }
+      .width('100%')
+      .padding({ left: 20, right: 20 })
+      // 整块骨架一起明暗：一次动画，比逐卡扫光便宜且同样"在动"
+      .opacity(this.overlayPulse ? 0.55 : 1)
+      .animation(this.pulseParam(1200))
+      .onAppear(() => {
+        this.overlayPulse = true;
+      })
+
+      Row() {
+        LoadingProgress()
+          .width(18)
+          .height(18)
+          .color(this.palette.accent)
+        Text(this.importStage.length > 0 ? this.importStage : '正在导入')
+          .fontSize(13)
+          .fontColor(this.palette.subText)
+          .margin({ left: 8 })
+      }
+      .width('100%')
+      .justifyContent(FlexAlign.Center)
+      .margin({ top: 30 })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.palette.bg)
+    .justifyContent(FlexAlign.Start)
+    .alignItems(HorizontalAlign.Center)
+    .transition(TransitionEffect.OPACITY.animation(Motion.fade(200)))
+  }
+
   @Builder
   emptyState() {
     Column() {
+      this.emptyIllustration()
       Text(this.emptyTitle())
         .fontSize(22)
         .fontWeight(FontWeight.Bold)
@@ -1431,13 +1661,25 @@ struct Index {
     return $r('sys.symbol.person');
   }
 
-  /** 原手绘几何图标（约 10 个形状图层）改为单图层矢量符号，选中项播放一次弹跳 */
+  /** 分层设色的次层色：主色压一层透明度，符号第二层因此比主层淡，层次立刻分明 */
+  private symbolLayer(color: string, alpha: string): string {
+    if (color.startsWith('#') && color.length === 9) {
+      return `#${alpha}${color.substring(3)}`;
+    }
+    if (color.startsWith('#') && color.length === 7) {
+      return `#${alpha}${color.substring(1)}`;
+    }
+    return color;
+  }
+
+  /** 原手绘几何图标（约 10 个形状图层）改为矢量符号：分层设色 + 选中项播放一次弹跳 */
   @Builder
   tabIcon(index: number) {
     SymbolGlyph(this.tabSymbol(index))
       .fontSize(this.currentTab === index ? 20 : 18)
-      .fontColor([this.tabColor(index)])
-      .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+      .fontColor([this.tabColor(index),
+        this.symbolLayer(this.tabColor(index), this.currentTab === index ? 'B3' : '8C')])
+      .renderingStrategy(SymbolRenderingStrategy.MULTIPLE_OPACITY)
       .symbolEffect(new BounceSymbolEffect(EffectScope.WHOLE, EffectDirection.UP),
         this.currentTab === index)
       .width(22)
@@ -1481,7 +1723,7 @@ struct Index {
         .backgroundColor(this.palette.accent)
         .shadow({ radius: 14, color: this.palette.accentSoft, offsetX: 0, offsetY: 5 })
         .translate({ x: this.tabSliderWidth() * this.currentTab })
-        .animation({ curve: curves.springMotion(0.32, 0.78) })
+        .animation(Motion.quick())
         .visibility(this.tabSliderWidth() > 0 ? Visibility.Visible : Visibility.Hidden)
 
       Row() {
@@ -1578,8 +1820,9 @@ struct Index {
       }
     }
     .width('100%')
-    .backgroundColor(this.palette.barBg)
-    .backdropBlur(BLUR_RADIUS)
+    // 底色与毛玻璃都随滚动浮现：首屏干净，滚动后才是毛玻璃（不要在滚动内容上加模糊）
+    .backgroundColor(this.topBarBg())
+    .backdropBlur(this.topBarBlur())
     // Stack 的 alignContent 是 Bottom，这里必须显式贴到顶边，否则标题栏会掉到底部
     .position({ x: 0, y: 0 })
     // 空白处吃掉点击（不穿透到下面的书卡），但滑动仍交给书架列表
@@ -1605,7 +1848,7 @@ struct Index {
           if (this.gridCount() === 0) {
             this.emptyState()
           } else {
-            Grid() {
+            Grid(this.shelfScroller) {
               // 首屏留白：与顶部模糊栏等高的一整行（3 列各占一格），
               // 让内容初始从模糊栏下方开始；滚动后这行会滑出屏幕，书籍才能滑进模糊区
               ForEach([0, 1, 2], (index: number) => {
@@ -1659,7 +1902,7 @@ struct Index {
                     radius: 16
                   })
                   // 雾化 / 描边与封面放大共用同一条慢弹簧，进出管理态是一段连续过渡
-                  .animation({ curve: curves.springMotion(0.5, 0.82) })
+                  .animation(Motion.slow())
                   .bindPopup(this.managing && this.manageTargetId === item.id
                     && !this.groupSheetVisible && !this.newGroupVisible, {
                     builder: this.bookActionMenu,
@@ -1686,6 +1929,10 @@ struct Index {
             .layoutWeight(1)
             .padding({ left: 20, right: 20, bottom: this.bottomInset + 24 })
             .scrollBar(BarState.Off)
+            // 顶栏随滚动浮现：读绝对偏移而不是累加增量，回弹/越界都不会漂
+            .onDidScroll((scrollOffset: number, scrollState: ScrollState) => {
+              this.updateTopBarReveal(this.shelfScroller.currentOffset().yOffset);
+            })
             // 点网格空白处退出管理态（书卡与分组卡各自消费自己的点击）
             .onClick(() => {
               if (this.managing) {
@@ -1719,22 +1966,7 @@ struct Index {
       }
 
       if (this.importing) {
-        Column() {
-          LoadingProgress()
-            .width(48)
-            .height(48)
-            // 导入遮罩是黑底，此处固定浅色，不跟随深色主题变暗
-            .color('#FFF8ED')
-          Text(this.importStage.length > 0 ? this.importStage : '正在导入')
-            .fontSize(14)
-            .fontColor('#FFF8ED')
-            .margin({ top: 14 })
-        }
-        .width('100%')
-        .height('100%')
-        .backgroundColor(this.palette.overlay)
-        .justifyContent(FlexAlign.Center)
-        .alignItems(HorizontalAlign.Center)
+        this.importSkeleton()
       }
     }
     .width('100%')
