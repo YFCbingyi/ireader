@@ -29,9 +29,36 @@ const TAB_BAR_MARGIN = 16;
 const FILTER_ALL = 0;
 const FILTER_TEXT = 1;
 const FILTER_IMAGE = 2;
-// TXT 支持一次多选导入；图片书一次只能导入一个 ZIP（子目录即章节，多包易混淆）
-const TXT_MAX_SELECT = 20;
-const ZIP_MAX_SELECT = 1;
+// 导入上限：一次最多选 100 个文件；选文件夹时扫描结果同样按此上限截断
+const IMPORT_MAX_FILES = 100;
+// 导入类型：文本书 / EPUB / ZIP 图片包（文件夹扫描后按扩展名分派）
+const IMPORT_TXT = 0;
+const IMPORT_EPUB = 1;
+const IMPORT_ZIP = 2;
+
+/** 一个待导入项：来源地址（picker uri，或文件夹里的子项 uri）与导入类型 */
+class ImportItem {
+  uri: string = '';
+  kind: number = IMPORT_TXT;
+
+  static of(uri: string, kind: number): ImportItem {
+    const item = new ImportItem();
+    item.uri = uri;
+    item.kind = kind;
+    return item;
+  }
+}
+
+/** 文件夹扫描出来的扩展名 → 导入类型 */
+function importKindOf(ext: string): number {
+  if (ext === 'epub') {
+    return IMPORT_EPUB;
+  }
+  if (ext === 'zip') {
+    return IMPORT_ZIP;
+  }
+  return IMPORT_TXT;
+}
 
 @Entry
 @ComponentV2
@@ -489,109 +516,54 @@ struct Index {
     });
   }
 
-  private handleImportResult(result: ImportResult): void {
-    if (result.success) {
-      this.loadBooks();
-      if (result.skippedImages > 0) {
-        this.toast(`已导入《${result.title}》，跳过 ${result.skippedImages} 张超大或损坏图片`);
-      } else {
-        this.toast(`已导入《${result.title}》`);
-      }
-    } else {
-      this.toast(`导入失败：${result.message}`);
-    }
+  /** 导入 TXT：一次最多选 IMPORT_MAX_FILES 个文件 */
+  private async importTxt(): Promise<void> {
+    await this.pickFiles(IMPORT_TXT, ['文本文件|.txt']);
   }
 
   /**
-   * 导入 TXT：支持一次多选。
+   * 选文件后批量导入：最多 IMPORT_MAX_FILES 个。
    * 串行逐本导入（避免多个 taskpool 任务同时读盘争 IO），单本失败不影响后续，
    * 结束后统一刷新书架并汇总结果。
    */
-  private async importTxt(): Promise<void> {
+  private async pickFiles(kind: number, filters: string[]): Promise<void> {
     if (this.importing) {
       return;
     }
     const context = this.appContext();
     try {
       const options = new picker.DocumentSelectOptions();
-      options.fileSuffixFilters = ['文本文件|.txt'];
-      options.maxSelectNumber = TXT_MAX_SELECT;
+      options.fileSuffixFilters = filters;
+      options.maxSelectNumber = IMPORT_MAX_FILES;
       const docPicker = new picker.DocumentViewPicker(context);
       const uris: string[] = await docPicker.select(options);
       if (uris.length === 0) {
         return;
       }
-      this.importing = true;
-      this.importStage = '准备导入';
-      const count = uris.length;
-      let okCount = 0;
-      let okTitle = '';
-      let skippedImages = 0;
-      let firstError = '';
+      const count = Math.min(uris.length, IMPORT_MAX_FILES);
+      const items: ImportItem[] = [];
       for (let i = 0; i < count; i++) {
-        const prefix = count > 1 ? `第 ${i + 1}/${count} 本 · ` : '';
-        this.importStage = `${prefix}准备导入`;
-        const result = await ImportService.importTxt(uris[i],
-          (stage: string, current: number, total: number): void => {
-            const detail = total > 1 ? `${stage} ${current}/${total}` : stage;
-            this.importStage = `${prefix}${detail}`;
-          });
-        if (result.success) {
-          okCount++;
-          okTitle = result.title;
-          skippedImages += result.skippedImages;
-        } else if (firstError.length === 0) {
-          firstError = count > 1 ? `第 ${i + 1} 本：${result.message}` : result.message;
-        }
+        items.push(ImportItem.of(uris[i], kind));
       }
-      this.loadBooks();
-      this.reportImportSummary(okCount, count, okTitle, skippedImages, firstError);
+      await this.runImport(items);
     } catch (e) {
-      const err = e as BusinessError;
-      if (err.message !== undefined && err.message.length > 0) {
-        this.toast(`导入失败：${err.message}`);
-      }
-    } finally {
-      this.importing = false;
-      this.importStage = '';
+      this.reportImportError(e as BusinessError);
     }
   }
 
-  /** 多选导入的汇总提示：全成功只报数量，有失败时带首个失败原因 */
-  private reportImportSummary(okCount: number, total: number, okTitle: string,
-    skippedImages: number, firstError: string): void {
-    if (total <= 1) {
-      if (okCount === 1) {
-        this.toast(skippedImages > 0
-          ? `已导入《${okTitle}》，跳过 ${skippedImages} 张超大或损坏图片`
-          : `已导入《${okTitle}》`);
-      } else {
-        this.toast(`导入失败：${firstError.length > 0 ? firstError : '未知错误'}`);
-      }
-      return;
-    }
-    if (okCount === total) {
-      this.toast(skippedImages > 0
-        ? `已导入 ${okCount} 本，跳过 ${skippedImages} 张超大或损坏图片`
-        : `已导入 ${okCount} 本`);
-      return;
-    }
-    if (okCount === 0) {
-      this.toast(`${total} 本均导入失败：${firstError.length > 0 ? firstError : '未知错误'}`);
-      return;
-    }
-    this.toast(`已导入 ${okCount} 本，${total - okCount} 本失败：${firstError}`);
-  }
-
-  /** 导入 EPUB：一次一个文件，解包后按 spine 顺序抽成单章 txt */
-  private async importEpub(): Promise<void> {
+  /**
+   * 导入文件夹：选中目录后递归收集其中的 txt / epub / zip 批量导入。
+   * 目录选择不参与后缀过滤，格式由扫描结果决定；
+   * 导入完成后统一归到与文件夹同名的分组里（同名分组已存在则直接并入）。
+   */
+  private async importFolder(): Promise<void> {
     if (this.importing) {
       return;
     }
     const context = this.appContext();
     try {
       const options = new picker.DocumentSelectOptions();
-      options.fileSuffixFilters = ['EPUB 电子书|.epub'];
+      options.selectMode = picker.DocumentSelectMode.FOLDER;
       options.maxSelectNumber = 1;
       const docPicker = new picker.DocumentViewPicker(context);
       const uris: string[] = await docPicker.select(options);
@@ -599,54 +571,123 @@ struct Index {
         return;
       }
       this.importing = true;
-      this.importStage = '准备导入';
-      const result = await ImportService.importEpub(uris[0],
-        (stage: string, current: number, total: number): void => {
-          this.importStage = total > 1 ? `${stage} ${current}/${total}` : stage;
-        });
-      this.handleImportResult(result);
-    } catch (e) {
-      const err = e as BusinessError;
-      if (err.message !== undefined && err.message.length > 0) {
-        this.toast(`导入失败：${err.message}`);
+      this.importStage = '扫描文件夹';
+      const books = ImportService.scanFolder(uris[0], IMPORT_MAX_FILES);
+      if (books.length === 0) {
+        this.toast('文件夹里没有找到 TXT / EPUB / ZIP 文件');
+        return;
       }
+      const items: ImportItem[] = [];
+      for (let i = 0; i < books.length; i++) {
+        items.push(ImportItem.of(books[i].uri, importKindOf(books[i].kind)));
+      }
+      await this.runImport(items, ImportService.folderNameOf(uris[0]));
+    } catch (e) {
+      this.reportImportError(e as BusinessError);
+    } finally {
+      // runImport 正常结束时会自行复位；扫描阶段提前返回 / 抛异常时在这里兜底
+      if (this.importing) {
+        this.importing = false;
+        this.importStage = '';
+      }
+    }
+  }
+
+  /**
+   * 批量串行导入：进度写进导入遮罩，结束后刷新书架并汇总提示。
+   * groupName 非空时，本次成功导入的书统一并入该分组（用于「导入文件夹」）。
+   */
+  private async runImport(items: ImportItem[], groupName: string = ''): Promise<void> {
+    const count = Math.min(items.length, IMPORT_MAX_FILES);
+    if (count === 0) {
+      return;
+    }
+    this.importing = true;
+    this.importStage = '准备导入';
+    let okCount = 0;
+    let okTitle = '';
+    let skippedImages = 0;
+    let firstError = '';
+    const importedIds: string[] = [];
+    try {
+      for (let i = 0; i < count; i++) {
+        const item = items[i];
+        const prefix = count > 1 ? `第 ${i + 1}/${count} 本 · ` : '';
+        this.importStage = `${prefix}准备导入`;
+        const onProgress = (stage: string, current: number, total: number): void => {
+          const detail = total > 1 ? `${stage} ${current}/${total}` : stage;
+          this.importStage = `${prefix}${detail}`;
+        };
+        let result: ImportResult = ImportResult.fail('未执行');
+        if (item.kind === IMPORT_EPUB) {
+          result = await ImportService.importEpub(item.uri, onProgress);
+        } else if (item.kind === IMPORT_ZIP) {
+          result = await ImportService.importZip(item.uri, onProgress);
+        } else {
+          result = await ImportService.importTxt(item.uri, onProgress);
+        }
+        if (result.success) {
+          okCount++;
+          okTitle = result.title;
+          skippedImages += result.skippedImages;
+          importedIds.push(result.bookId);
+        } else if (firstError.length === 0) {
+          firstError = count > 1 ? `第 ${i + 1} 本：${result.message}` : result.message;
+        }
+      }
+      // 分组要写在 loadBooks 之前：书架的分组胶囊由 library.json 现算，先分组再刷新才能立刻看到
+      if (groupName.length > 0 && importedIds.length > 0) {
+        LibraryStore.setGroup(importedIds, groupName);
+      }
+      this.loadBooks();
+      this.reportImportSummary(okCount, count, okTitle, skippedImages, firstError, groupName);
     } finally {
       this.importing = false;
       this.importStage = '';
     }
   }
 
-  /** 导入图片书：一次只能选一个 ZIP */
-  private async importZip(): Promise<void> {
-    if (this.importing) {
+  private reportImportError(err: BusinessError): void {
+    if (err !== undefined && err.message !== undefined && err.message.length > 0) {
+      this.toast(`导入失败：${err.message}`);
+    }
+  }
+
+  /** 多选导入的汇总提示：全成功只报数量，有失败时带首个失败原因；有分组时一并说明 */
+  private reportImportSummary(okCount: number, total: number, okTitle: string,
+    skippedImages: number, firstError: string, groupName: string = ''): void {
+    const groupHint: string = groupName.length > 0 && okCount > 0 ? `到分组「${groupName}」` : '';
+    if (total <= 1) {
+      if (okCount === 1) {
+        this.toast(skippedImages > 0
+          ? `已导入《${okTitle}》${groupHint}，跳过 ${skippedImages} 张超大或损坏图片`
+          : `已导入《${okTitle}》${groupHint}`);
+      } else {
+        this.toast(`导入失败：${firstError.length > 0 ? firstError : '未知错误'}`);
+      }
       return;
     }
-    const context = this.appContext();
-    try {
-      const options = new picker.DocumentSelectOptions();
-      options.fileSuffixFilters = ['压缩包|.zip'];
-      options.maxSelectNumber = ZIP_MAX_SELECT;
-      const docPicker = new picker.DocumentViewPicker(context);
-      const uris: string[] = await docPicker.select(options);
-      if (uris.length === 0) {
-        return;
-      }
-      this.importing = true;
-      this.importStage = '准备导入';
-      const result = await ImportService.importZip(uris[0],
-        (stage: string, current: number, total: number): void => {
-          this.importStage = total > 1 ? `${stage} ${current}/${total}` : stage;
-        });
-      this.handleImportResult(result);
-    } catch (e) {
-      const err = e as BusinessError;
-      if (err.message !== undefined && err.message.length > 0) {
-        this.toast(`导入失败：${err.message}`);
-      }
-    } finally {
-      this.importing = false;
-      this.importStage = '';
+    if (okCount === total) {
+      this.toast(skippedImages > 0
+        ? `已导入 ${okCount} 本${groupHint}，跳过 ${skippedImages} 张超大或损坏图片`
+        : `已导入 ${okCount} 本${groupHint}`);
+      return;
     }
+    if (okCount === 0) {
+      this.toast(`${total} 本均导入失败：${firstError.length > 0 ? firstError : '未知错误'}`);
+      return;
+    }
+    this.toast(`已导入 ${okCount} 本${groupHint}，${total - okCount} 本失败：${firstError}`);
+  }
+
+  /** 导入 EPUB：一次最多选 IMPORT_MAX_FILES 个，解包后按 spine 顺序抽成单章 txt */
+  private async importEpub(): Promise<void> {
+    await this.pickFiles(IMPORT_EPUB, ['EPUB 电子书|.epub']);
+  }
+
+  /** 导入图片书：一次最多选 IMPORT_MAX_FILES 个 ZIP，每个包一本书 */
+  private async importZip(): Promise<void> {
+    await this.pickFiles(IMPORT_ZIP, ['压缩包|.zip']);
   }
 
   /**
@@ -1230,6 +1271,10 @@ struct Index {
         .onClick(() => {
           this.importZip();
         })
+      MenuItem({ content: '导入文件夹' })
+        .onClick(() => {
+          this.importFolder();
+        })
     }
   }
 
@@ -1266,12 +1311,22 @@ struct Index {
               this.importZip();
             })
         }
+        Button('导入文件夹')
+          .type(ButtonType.Capsule)
+          .backgroundColor(this.palette.chipBg)
+          .fontColor(this.palette.chipText)
+          .fontSize(15)
+          .margin({ left: 14 })
+          .onClick(() => {
+            this.importFolder();
+          })
       }
       .margin({ top: 28 })
 
-      Text('TXT 支持 UTF-8 / GBK，可一次多选；图片包为 ZIP，单次一个，子目录即章节')
+      Text('TXT 支持 UTF-8 / GBK，一次最多选 100 个文件；也可选择文件夹批量导入（TXT / EPUB / ZIP）')
         .fontSize(12)
         .fontColor(this.palette.subtleText)
+        .textAlign(TextAlign.Center)
         .margin({ top: 22 })
     }
     .width('100%')
