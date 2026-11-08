@@ -8,7 +8,7 @@ import { PagedItem, PageWindow } from '../../reader/PageWindow';
 import { BlockWindow, ReaderBlock } from '../../reader/BlockWindow';
 import { FlipEnd, FlipStateMachine, FlipUpdate } from '../../reader/FlipStateMachine';
 import { LayoutConfig } from '../../reader/LayoutConfig';
-import { FlipOverlay } from './FlipOverlay';
+import { LengthMetricsUnit } from '@kit.ArkUI';
 
 const DOMAIN = 0x0006;
 const TAG = 'TextReaderView';
@@ -42,6 +42,13 @@ const SELECTION_LOCK_AFTER_DOWN = 400;
 // 上下模式点击翻屏只滚可视高度的 90%，保留少量重叠便于衔接上下文
 const TAP_SCROLL_RATIO = 0.9;
 const TAP_SCROLL_DURATION = 240;
+/**
+ * 抬手抑制阈值（vp）：本次触摸位移超过该值就算拖动（翻页 / 下拉书签 / 滚动）。
+ * 拖动之后的抬手不能被当成点击 —— 否则慢速翻页时抬手点会被"点击左右/中间区域"
+ * 再判一次：落在两侧多翻一页（松手后倒退或前进两页），落在中间直接唤起控制栏
+ * （表现为「每次翻页都弹出上下状态栏」）。
+ */
+const TAP_MOVE_SLOP = 8;
 // 连续卷轴：初始窗口前后各 2 章；窗口常驻章数上限；距端部不足若干块时预加载相邻章
 const WINDOW_RADIUS = 2;
 const WINDOW_MAX_CHAPTERS = 8;
@@ -53,7 +60,31 @@ const MENU_DICT = 'ireader_dict';
 // 回弹 / 补间时长（ms）
 const FLIP_SETTLE_DURATION = 260;
 // 点击翻页的整页卷曲时长（ms）
-const FLIP_AUTO_DURATION = 380;
+const FLIP_AUTO_DURATION = 460;
+// 卷曲补间用的缓动（AnimateParam 不支持 onFrame，动画帧由组件自己驱动）
+function easeOutCubic(t: number): number {
+  return 1 - Math.pow(1 - t, 3);
+}
+
+function easeInOutCubic(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+// 折纸几何（参照华为阅读的仿真翻页）：整张纸绕折线翻折，是平面折叠，没有圆柱卷轴。
+// 折线过手指点，倾角由起手点高度决定：
+//   起手靠上 → 折线向右下倾，只折起右上角（看到一个书角）
+//   起手居中 → 折线竖直，右边缘整条被折起（上下各一个书角）
+//   起手靠下 → 折线向左下倾，只折起右下角
+// 折线与竖直方向的最大夹角（弧度，约 26°）
+const FOLD_MAX_ANGLE = 0.46;
+// 纸张背面白化强度。必须接近不透明，否则底下的目标页会透上来，
+// 与镜像反字叠成"两页文字重影"
+const FOLD_BACK_ALPHA = 0.972;
+// 折痕阴影强度与扩散宽度（占页宽比例）
+const FOLD_SHADOW_ALPHA = 0.24;
+const FOLD_SHADOW_SPREAD = 0.07;
+// 整页（含页眉页脚）截图用的组件 id：仿真翻页要连页眉章节名、页脚时间进度一起翻
+const FLIP_PAGE_ID = 'reader_flip_page_full';
 
 @ComponentV2
 struct ReaderFooter {
@@ -257,6 +288,10 @@ export struct TextReaderView {
   // 触摸按下后的选区锁：锁定期内禁用文本选择（防双击选词），松手自解
   @Local selectionLocked: boolean = false;
   private selectionUnlockTimer: number = -1;
+  // 本次触摸的按下点（窗口坐标）与"拖动过"标记：据此过滤掉拖动之后的误点击（见 TAP_MOVE_SLOP）
+  private touchDownX: number = 0;
+  private touchDownY: number = 0;
+  private tapSuppressed: boolean = false;
   private restoreTimer: number = -1;
   private readyTimer: number = -1;
   // 竖排定位：数据源变化后，在 List 完成布局（onScrollIndex 首次回调）时滚动到目标块
@@ -271,8 +306,28 @@ export struct TextReaderView {
   // 进度与方向是视觉层的唯一输入；位图为空时视觉层整层不绘制，直接看真实页面
   @Local flipProgress: number = 0;
   @Local flipDirection: number = 1;
-  @Local flipPageImage: image.PixelMap | undefined = undefined;
-  @Local flipTargetImage: image.PixelMap | undefined = undefined;
+  // 位图刻意不进状态系统：@Local 会给对象套观察代理，而 PixelMap 是 Native 对象，
+  // 被代理后 CanvasRenderingContext2D.drawImage 会静默失败（表现就是"卷曲完全没效果"）。
+  // 因此位图走普通字段传递，另用一个计数驱动视觉层重绘。
+  private flipPageImage: image.PixelMap | undefined = undefined;
+  private flipTargetImage: image.PixelMap | undefined = undefined;
+  // 卷曲直接画在本组件的 Canvas 上，不再走子组件：animateTo 的 onFrame 要在父组件里逐帧绘制，
+  // 而 V2 的 @Monitor 在动画插值期间不会逐帧回调（只在赋值瞬间回调一次），
+  // 隔着子组件传 @Param 会退化成「整段动画只画一帧」——现象是两页轻微重影后静止。
+  // 单位必须与 PixelMap 一致（px）：drawImage 的源矩形取自位图像素坐标，
+  // 而 CanvasRenderingContext2D 默认按 vp 计量，混用会把源区域缩到左上角一小块再拉伸
+  private flipCtx: CanvasRenderingContext2D =
+    new CanvasRenderingContext2D(new RenderingContextSettings(true), LengthMetricsUnit.PX);
+  // 位图实际像素尺寸：与画布尺寸可能差像素级，绘制时按比例换算源矩形
+  private flipPageWidth: number = 0;
+  private flipPageHeight: number = 0;
+  private flipTargetWidth: number = 0;
+  private flipTargetHeight: number = 0;
+  // 起手点在整页中的高度（px）：决定折线倾角，进而决定折起哪个书角
+  private flipAnchorY: number = 0;
+  private flipCanvasReady: boolean = false;
+  // 卷曲补间的帧定时器（-1 表示未运行）
+  private flipTimerId: number = -1;
   // 手势状态机（Strategy 层）：只算方向与进度，不碰 UI
   private flipMachine: FlipStateMachine = new FlipStateMachine();
   // 补间动画进行中：期间拒绝新手势，避免两张位图交叉
@@ -309,6 +364,7 @@ export struct TextReaderView {
   aboutToDisappear(): void {
     this.reportCurrent();
     // 仿真翻页的位图必须显式释放，否则每翻几页就漏两张
+    this.stopFlipTimer();
     this.releaseFlipImages();
     // 作废进行中的异步窗口 / 分页 / 预取，否则销毁后仍会继续读盘与 measureTextSize
     this.windowSeq++;
@@ -1234,7 +1290,52 @@ export struct TextReaderView {
    * - 上下模式：上侧 30% 上翻一屏，下侧 30% 下翻一屏，中间唤起控制栏。
    */
   private handleTap(event: ClickEvent): void {
-    this.applyTap(event.x, event.y);
+    // 与 onTouch 记录的按下点统一用窗口坐标
+    this.applyTap(event.windowX, event.windowY);
+  }
+
+  /**
+   * 记录本次触摸的按下点与是否发生过拖动。
+   * 根容器与正文各挂一份：正文的 onTouch 先到，父级也会收到冒泡，任一处置位即生效。
+   * 坐标统一用窗口坐标，避免正文（相对自身）与根容器（相对容器）两套原点混算。
+   */
+  private trackTouchMove(event: TouchEvent): void {
+    if (event.type === TouchType.Down) {
+      const down: TouchObject | undefined = event.touches[0];
+      if (down === undefined) {
+        return;
+      }
+      this.touchDownX = down.windowX;
+      this.touchDownY = down.windowY;
+      return;
+    }
+    if (event.type !== TouchType.Move) {
+      return;
+    }
+    const touch: TouchObject | undefined = event.touches[0];
+    if (touch === undefined) {
+      return;
+    }
+    if (Math.abs(touch.windowX - this.touchDownX) > TAP_MOVE_SLOP ||
+      Math.abs(touch.windowY - this.touchDownY) > TAP_MOVE_SLOP) {
+      this.tapSuppressed = true;
+    }
+  }
+
+  /**
+   * 拖动之后的抬手不是点击：只有"点击点离按下点很远"才丢弃。
+   *
+   * 不能只靠一个布尔标记：拖动后通常不会派发 onClick，标记会残留到下一次点击，
+   * 表现就是"翻完页点中间弹不出控制栏"。而每次点击的 Down 都会刷新按下点，
+   * 因此"离按下点很近"就说明这是一次独立的新点击，必须正常处理。
+   */
+  private consumeTapAfterDrag(x: number, y: number): boolean {
+    if (!this.tapSuppressed) {
+      return false;
+    }
+    this.tapSuppressed = false;
+    return Math.abs(x - this.touchDownX) > TAP_MOVE_SLOP ||
+      Math.abs(y - this.touchDownY) > TAP_MOVE_SLOP;
   }
 
   /**
@@ -1253,6 +1354,8 @@ export struct TextReaderView {
    * 长按需要按住 500ms 以上，系统判定长按时锁已解除，长按选词不受影响。
    */
   private onBodyTouch(event: TouchEvent): void {
+    // 正文也要记位移：翻页 / 下拉都在正文上起手，抬手点绝不能当成点击
+    this.trackTouchMove(event);
     if (event.type !== TouchType.Down) {
       return;
     }
@@ -1267,6 +1370,10 @@ export struct TextReaderView {
   }
 
   private applyTap(x: number, y: number): void {
+    // 拖动翻页 / 下拉书签 / 滚动之后的抬手不是点击：否则会在刚翻完的页上再判一次分区
+    if (this.consumeTapAfterDrag(x, y)) {
+      return;
+    }
     if (this.controlsVisible) {
       this.onTap();
       return;
@@ -1324,23 +1431,35 @@ export struct TextReaderView {
     this.flipTargetPending = false;
   }
 
-  /** 抓当前页位图（手势起点唯一依赖的图，先抓它） */
-  private captureFlipPage(index: number): void {
-    if (index < 0 || index >= this.pageWindow.source.totalCount()) {
-      return;
-    }
-    this.getUIContext().getComponentSnapshot().get(this.pageComponentId(index))
+  /**
+   * 抓当前整页位图（含页眉章节名与页脚时间/进度）。
+   * 翻页层要盖住整个页面，所以抓的是整页容器而不是 Swiper 里那一页正文。
+   */
+  private captureFlipPage(allowRetry: boolean = true): void {
+    this.getUIContext().getComponentSnapshot().get(FLIP_PAGE_ID)
       .then((pixelMap: image.PixelMap) => {
         this.releaseImage(this.flipPageImage);
         this.flipPageImage = pixelMap;
+        const info = pixelMap.getImageInfoSync();
+        this.flipPageWidth = info.size.width;
+        this.flipPageHeight = info.size.height;
+        this.drawFlipAt(this.flipProgress);
       })
       .catch((error: Error) => {
-        hilog.warn(DOMAIN, TAG, 'capture page %{public}d failed: %{public}s', index, error.message);
+        hilog.warn(DOMAIN, TAG, 'capture page failed: %{public}s', JSON.stringify(error));
+        // 跨章重建数据源时页节点可能还没挂上，补抓一次；手势已结束就不再补
+        if (allowRetry) {
+          this.scheduleOnce((): void => {
+            if (this.flipMachine.isDragging() || this.flipBusy) {
+              this.captureFlipPage(false);
+            }
+          }, 80);
+        }
       });
   }
 
   /** 抓目标页位图；在途期间不重复发起（拖动每帧都会走到这里） */
-  private captureFlipTarget(index: number): void {
+  private captureFlipTarget(index: number, allowRetry: boolean = true): void {
     if (this.flipTargetPending || index < 0 || index >= this.pageWindow.source.totalCount()) {
       return;
     }
@@ -1350,25 +1469,42 @@ export struct TextReaderView {
         this.flipTargetPending = false;
         this.releaseImage(this.flipTargetImage);
         this.flipTargetImage = pixelMap;
+        const info = pixelMap.getImageInfoSync();
+        this.flipTargetWidth = info.size.width;
+        this.flipTargetHeight = info.size.height;
+        this.drawFlipAt(this.flipProgress);
       })
       .catch((error: Error) => {
         this.flipTargetPending = false;
-        hilog.warn(DOMAIN, TAG, 'capture target %{public}d failed: %{public}s', index, error.message);
+        hilog.warn(DOMAIN, TAG, 'capture target %{public}d failed: %{public}s', index, JSON.stringify(error));
+        if (allowRetry) {
+          this.scheduleOnce((): void => {
+            if (this.flipMachine.isDragging() || this.flipBusy) {
+              this.captureFlipTarget(index, false);
+            }
+          }, 80);
+        }
       });
   }
 
-  /** 手势起点：状态机接管，只抓当前页；方向与目标页等首次位移再定 */
-  private onFlipStart(): void {
+  /**
+   * 手势起点：状态机接管，只抓当前页；方向与目标页等首次位移再定。
+   * anchorY 是起手点在正文区里的 y（vp，相对正文区顶部），换算成整页坐标后决定折线倾角。
+   */
+  private onFlipStart(anchorY: number = -1): void {
     if (!this.canSimulationFlip()) {
       return;
     }
+    const bodyTop = vp2px(HEADER_HEIGHT);
+    const bodyHeight = vp2px(this.lastHeight - HEADER_HEIGHT - FOOTER_HEIGHT);
+    this.flipAnchorY = anchorY >= 0 ? bodyTop + vp2px(anchorY) : bodyTop + bodyHeight * 0.5;
     this.flipMachine.begin();
     this.flipProgress = 0;
     this.flipDirection = 1;
     this.flipTargetPending = false;
     this.releaseImage(this.flipTargetImage);
     this.flipTargetImage = undefined;
-    this.captureFlipPage(this.currentPage);
+    this.captureFlipPage();
   }
 
   /**
@@ -1377,6 +1513,14 @@ export struct TextReaderView {
    * 用户看到的是真实页面，所以首帧不会闪白，只是卷曲效果晚一两帧出现。
    */
   private onFlipUpdate(offsetX: number): void {
+    if (!this.flipMachine.isDragging()) {
+      // onActionStart 可能落在数据源重建的锁定窗口里被拒；拖动既已成立就补接一次，
+      // 否则整个手势全程无效（用户感知为仿真翻页完全没反应）
+      if (!this.canSimulationFlip()) {
+        return;
+      }
+      this.onFlipStart();
+    }
     const update: FlipUpdate = this.flipMachine.update(offsetX, this.lastWidth);
     if (!update.active) {
       return;
@@ -1386,6 +1530,7 @@ export struct TextReaderView {
       this.captureFlipTarget(update.direction > 0 ? this.currentPage + 1 : this.currentPage - 1);
     }
     this.flipProgress = update.progress;
+    this.drawFlipAt(update.progress);
   }
 
   /** 抬手：状态机按位移与速度判定翻满 / 回弹，补间结束后再真正切索引 */
@@ -1394,16 +1539,9 @@ export struct TextReaderView {
       return;
     }
     const result: FlipEnd = this.flipMachine.end(velocityX);
-    this.flipBusy = true;
-    this.getUIContext().animateTo({
-      duration: FLIP_SETTLE_DURATION,
-      curve: Curve.EaseOut
-    }, () => {
-      this.flipProgress = result.commit ? 1 : 0;
-    });
-    this.scheduleOnce((): void => {
+    this.animateFlip(result.commit ? 1 : 0, FLIP_SETTLE_DURATION, easeOutCubic, (): void => {
       this.settleFlip(result.commit, result.direction);
-    }, FLIP_SETTLE_DURATION);
+    });
   }
 
   private onFlipCancel(): void {
@@ -1411,17 +1549,233 @@ export struct TextReaderView {
       return;
     }
     this.flipMachine.cancel();
-    this.flipBusy = true;
-    this.getUIContext().animateTo({
-      duration: FLIP_SETTLE_DURATION,
-      curve: Curve.EaseOut
-    }, () => {
-      this.flipProgress = 0;
-    });
-    this.scheduleOnce((): void => {
+    this.animateFlip(0, FLIP_SETTLE_DURATION, easeOutCubic, (): void => {
       this.settleFlip(false, 1);
-    }, FLIP_SETTLE_DURATION);
+    });
   }
+
+  /**
+   * 画一帧折纸翻页（平面折叠，不是圆柱卷轴）。
+   *
+   * 整张纸沿一条折线翻折，折起的一侧绕折线做镜像贴在页面上，形成一个纸角：
+   *   折线过"手指点" C = (手指 x, 起手点 y)，与竖直方向夹角 φ 由起手点高度决定：
+   *     起手靠上 → 折线横向倾角大，只折起右上角（看到一个书角）
+   *     起手居中 → 折线竖直，整条右边缘折起（上下各一个书角）
+   *     起手靠下 → 只折起右下角
+   *   起手点越靠上/下，另一个角的"完整度"越小，中途是连续过渡的。
+   *
+   * 折起的一侧 D = 矩形 ∩ 折线外侧半平面：那一侧的画面绕折线镜像后铺纸白当纸背，
+   * 原来位置的画面则已经折走，露出下层目标页。所以整页（含页眉章节名、页脚时间进度）
+   * 都跟着折起来，而不是只有中间正文在动。
+   *
+   * 向前翻只是把几何整体镜像（side = -1），不镜像画面本身，页眉页脚文字不会反写。
+   */
+  private drawFlipAt(progress: number): void {
+    if (!this.flipCanvasReady) {
+      return;
+    }
+    const ctx = this.flipCtx;
+    const width = ctx.width;
+    const height = ctx.height;
+    if (!(width > 0) || !(height > 0)) {
+      return;
+    }
+    ctx.clearRect(0, 0, width, height);
+    if (progress <= 0.002) {
+      return;
+    }
+    const page = this.flipPageImage;
+    const target = this.flipTargetImage;
+    if (page === undefined || target === undefined) {
+      return;
+    }
+    const ratio = Math.min(1, progress);
+    const bodyTop = vp2px(HEADER_HEIGHT);
+    const side = this.flipDirection >= 0 ? 1 : -1;
+    const anchor = Math.max(0, Math.min(height, this.flipAnchorY));
+    // 起手点越靠上，折线越"平"，折起的就是上面的角
+    const phi = (0.5 - anchor / height) * 2 * FOLD_MAX_ANGLE;
+    const cx = side > 0 ? width * (1 - ratio) : width * ratio;
+    const nx = side * Math.cos(phi);
+    const ny = -Math.sin(phi);
+
+    // 1) 目标页：整屏纸色打底，正文位图贴在页眉下方（目标页位图只含正文区）
+    ctx.fillStyle = this.bgColor;
+    ctx.fillRect(0, 0, width, height);
+    if (this.flipTargetWidth > 0 && this.flipTargetHeight > 0) {
+      ctx.drawImage(target, 0, 0, this.flipTargetWidth, this.flipTargetHeight,
+        0, bodyTop, this.flipTargetWidth, this.flipTargetHeight);
+    }
+
+    // 2) 当前页正面：只画还没折起的一侧，折走的那侧露出目标页
+    const keep = this.foldRegion(width, height, cx, anchor, -nx, -ny);
+    if (keep.length >= 6) {
+      ctx.save();
+      this.pathPolygon(ctx, keep);
+      ctx.clip();
+      if (this.flipPageWidth > 0 && this.flipPageHeight > 0) {
+        ctx.drawImage(page, 0, 0, this.flipPageWidth, this.flipPageHeight, 0, 0, width, height);
+      }
+      ctx.restore();
+    }
+
+    // 3) 折起的纸角
+    this.drawFold(ctx, page, width, height, cx, anchor, phi, side);
+  }
+
+  /**
+   * 折起部分：把折线外侧 D 内的画面绕折线镜像，铺上纸白当纸背，描一道纸边亮线。
+   * 折线过 (cx, cy)；side = 1 折右侧，side = -1 折左侧。
+   */
+  private drawFold(ctx: CanvasRenderingContext2D, page: image.PixelMap, width: number,
+    height: number, cx: number, cy: number, phi: number, side: number): void {
+    const nx = side * Math.cos(phi);
+    const ny = -Math.sin(phi);
+    const dirX = side * Math.sin(phi);
+    const dirY = Math.cos(phi);
+    const polygon = this.foldRegion(width, height, cx, cy, nx, ny);
+    if (polygon.length < 6) {
+      return;
+    }
+    // 关于过 (cx, cy)、方向 (dirX, dirY) 的直线的反射矩阵
+    const cos2 = dirX * dirX - dirY * dirY;
+    const sin2 = 2 * dirX * dirY;
+    const tx = cx - (cos2 * cx + sin2 * cy);
+    const ty = cy - (sin2 * cx - cos2 * cy);
+
+    // 纸角投影：先把纸角的形状带模糊地投下去，纸角才"立"得起来；
+    // 这一层随后被不透明的纸背盖住，只留下外缘的柔和阴影
+    ctx.save();
+    ctx.transform(cos2, sin2, sin2, -cos2, tx, ty);
+    ctx.shadowColor = 'rgba(16,13,8,0.28)';
+    ctx.shadowBlur = Math.max(6, width * 0.016);
+    ctx.shadowOffsetX = width * 0.005;
+    ctx.shadowOffsetY = height * 0.005;
+    ctx.fillStyle = 'rgba(16,13,8,0.5)';
+    this.pathPolygon(ctx, polygon);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, width, height);
+    ctx.clip();
+    ctx.transform(cos2, sin2, sin2, -cos2, tx, ty);
+    this.pathPolygon(ctx, polygon);
+    ctx.clip();
+    if (this.flipPageWidth > 0 && this.flipPageHeight > 0) {
+      ctx.drawImage(page, 0, 0, this.flipPageWidth, this.flipPageHeight, 0, 0, width, height);
+    }
+    // 纸背：接近不透明的纸白（比正面略暖一点，才看得出是背面），只透出极淡的反字
+    ctx.fillStyle = `rgba(251,247,238,${FOLD_BACK_ALPHA})`;
+    this.pathPolygon(ctx, polygon);
+    ctx.fill();
+    // 纸边亮线，让翻起的纸有厚度感
+    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+    ctx.lineWidth = Math.max(1, width * 0.0025);
+    this.pathPolygon(ctx, polygon);
+    ctx.stroke();
+    ctx.restore();
+
+    // 折痕阴影落在未折起的一侧，模拟纸角翘起后遮光
+    this.drawFoldShadow(ctx, width, height, cx, cy, nx, ny);
+  }
+
+  /** 页面矩形被「相对折线外侧」半平面裁出的多边形（x,y 交错） */
+  private foldRegion(width: number, height: number, cx: number, cy: number,
+    nx: number, ny: number): number[] {
+    const corners: number[] = [0, 0, width, 0, width, height, 0, height];
+    const result: number[] = [];
+    const count = corners.length / 2;
+    for (let i = 0; i < count; i++) {
+      const ax = corners[i * 2];
+      const ay = corners[i * 2 + 1];
+      const next = (i + 1) % count;
+      const bx = corners[next * 2];
+      const by = corners[next * 2 + 1];
+      const sideA = (ax - cx) * nx + (ay - cy) * ny;
+      const sideB = (bx - cx) * nx + (by - cy) * ny;
+      if (sideA >= 0) {
+        result.push(ax);
+        result.push(ay);
+      }
+      if ((sideA > 0 && sideB < 0) || (sideA < 0 && sideB > 0)) {
+        const k = sideA / (sideA - sideB);
+        result.push(ax + (bx - ax) * k);
+        result.push(ay + (by - ay) * k);
+      }
+    }
+    return result;
+  }
+
+  private pathPolygon(ctx: CanvasRenderingContext2D, polygon: number[]): void {
+    ctx.beginPath();
+    for (let i = 0; i + 1 < polygon.length; i += 2) {
+      if (i === 0) {
+        ctx.moveTo(polygon[0], polygon[1]);
+      } else {
+        ctx.lineTo(polygon[i], polygon[i + 1]);
+      }
+    }
+    ctx.closePath();
+  }
+
+  /** 折痕阴影：贴着折线、沿法向反方向衰减，只画在未折起的一侧 */
+  private drawFoldShadow(ctx: CanvasRenderingContext2D, width: number, height: number,
+    cx: number, cy: number, nx: number, ny: number): void {
+    const keep = this.foldRegion(width, height, cx, cy, -nx, -ny);
+    if (keep.length < 6) {
+      return;
+    }
+    const spread = Math.max(6, width * FOLD_SHADOW_SPREAD);
+    ctx.save();
+    this.pathPolygon(ctx, keep);
+    ctx.clip();
+    const gradient = ctx.createLinearGradient(cx, cy, cx - nx * spread, cy - ny * spread);
+    gradient.addColorStop(0, `rgba(24,20,12,${FOLD_SHADOW_ALPHA})`);
+    gradient.addColorStop(0.45, `rgba(24,20,12,${FOLD_SHADOW_ALPHA * 0.35})`);
+    gradient.addColorStop(1, 'rgba(24,20,12,0)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+    ctx.restore();
+  }
+
+  /**
+   * 卷曲补间：用 animateTo 的 onFrame 逐帧驱动绘制。
+   * 闭包里仍写一次 flipProgress（保证动画有状态变更、onFrame 按帧回调），
+   * 但画面完全由 onFrame 里的 drawFlipAt 决定，不依赖 @Monitor。
+   */
+  private animateFlip(to: number, duration: number, easing: (t: number) => number,
+    done: () => void): void {
+    const from = this.flipProgress;
+    this.flipBusy = true;
+    this.stopFlipTimer();
+    const startTime = Date.now();
+    let frames = 0;
+    this.flipTimerId = setInterval((): void => {
+      const elapsed = Date.now() - startTime;
+      const ratio = elapsed >= duration ? 1 : elapsed / duration;
+      this.drawFlipAt(from + (to - from) * easing(ratio));
+      frames++;
+      if (ratio >= 1) {
+        this.stopFlipTimer();
+        this.flipProgress = to;
+        this.drawFlipAt(to);
+        const spent = Date.now() - startTime;
+        hilog.info(DOMAIN, TAG, 'flip done %{public}dms %{public}d frames ~%{public}d fps',
+          spent, frames, Math.round(frames * 1000 / (spent > 0 ? spent : 1)));
+        done();
+      }
+    }, 16);
+  }
+
+  private stopFlipTimer(): void {
+    if (this.flipTimerId >= 0) {
+      clearInterval(this.flipTimerId);
+      this.flipTimerId = -1;
+    }
+  }
+
 
   /** 卷曲补间落地：清位图后按需切页（silent 切换，不再重播动画） */
   private settleFlip(commit: boolean, direction: number): void {
@@ -1429,39 +1783,37 @@ export struct TextReaderView {
     this.flipProgress = 0;
     this.flipMachine.reset();
     this.releaseFlipImages();
+    this.drawFlipAt(0);
     if (commit) {
       this.turnPage(direction, true);
     }
   }
 
   /**
-   * 点击翻页的整页卷曲：先抓两张位图再起补间。
-   * 位图没就绪也照常推进（结束后照常切页），只是这一段看不到卷曲。
+   * 点击翻页的整页翻折：先抓两张位图再起补间。
+   * 位图没就绪也照常推进（结束后照常切页），只是这一段看不到折纸效果。
    */
   private playFlipTo(target: number): void {
     const direction = target >= this.currentPage ? 1 : -1;
     this.flipBusy = true;
     this.flipDirection = direction;
     this.flipProgress = 0;
-    this.captureFlipPage(this.currentPage);
+    // 点击翻页没有起手点，按页面中部折，得到"上下两个书角"的整页翻折
+    this.flipAnchorY = vp2px(HEADER_HEIGHT + (this.lastHeight - HEADER_HEIGHT - FOOTER_HEIGHT) * 0.5);
+    this.captureFlipPage();
     this.captureFlipTarget(target);
     this.scheduleOnce((): void => {
-      this.getUIContext().animateTo({
-        duration: FLIP_AUTO_DURATION,
-        curve: Curve.EaseInOut
-      }, () => {
-        this.flipProgress = 1;
-      });
-      this.scheduleOnce((): void => {
+      this.animateFlip(1, FLIP_AUTO_DURATION, easeInOutCubic, (): void => {
         this.flipBusy = false;
         this.flipProgress = 0;
         this.flipMachine.reset();
         this.releaseFlipImages();
+        this.drawFlipAt(0);
         this.swiperController.changeIndex(target, false);
         this.turnTargetPage = target;
         this.turnTargetAt = Date.now();
-      }, FLIP_AUTO_DURATION);
-    }, 40);
+      });
+    }, 90);
   }
 
   /** 仿真翻页的可用条件：横向分页、仿真模式、控制栏收起、无选区操作、无动画在跑 */
@@ -1472,7 +1824,9 @@ export struct TextReaderView {
     if (this.pageTurn !== PageTurnMode.SIMULATION) {
       return false;
     }
-    if (this.controlsVisible || this.flipBusy || this.selectionLocked) {
+    // 注意：这里不能看 selectionLocked —— 手指按下时正文的 onTouch 会先锁 400ms，
+    // 而 PanGesture 的 onActionStart 正好落在这段时间内，一旦否决就再也接不上手势
+    if (this.controlsVisible || this.flipBusy) {
       return false;
     }
     return !this.pageDragLocked();
@@ -1654,6 +2008,9 @@ export struct TextReaderView {
           bottom: CONTENT_PAD
         })
         .shadow(this.pageShadow())
+        // 背景色必须画在页组件自己身上：仿真翻页按 id 截该组件，
+        // 背景若留在父级 Stack 上，截出来的位图是透明的，两层叠加就变成"文字重影"
+        .backgroundColor(this.bgColor)
         // 仿真翻页按 id 抓当前页 / 目标页位图（见 captureFlipPage）
         .id(this.pageComponentId(index))
       }, (item: PagedItem) => `${item.key}_${item.text.length}_${this.annotationsVersion}`)
@@ -1674,55 +2031,51 @@ export struct TextReaderView {
   }
 
   build() {
-    Column() {
-      this.header()
+    Stack() {
+      Column() {
+        this.header()
 
-      Stack() {
-        if (this.mode === ReadingMode.VERTICAL) {
-          this.verticalBody()
-        } else {
-          this.horizontalBody()
+        Stack() {
+          if (this.mode === ReadingMode.VERTICAL) {
+            this.verticalBody()
+          } else {
+            this.horizontalBody()
+          }
         }
-        if (this.mode === ReadingMode.HORIZONTAL) {
-          FlipOverlay({
-            progress: this.flipProgress,
-            flipDirection: this.flipDirection,
-            currentPage: this.flipPageImage,
-            nextPage: this.flipTargetImage
-          })
-        }
+        .width('100%')
+        .layoutWeight(1)
+        // parallelGesture 不抢子组件手势：Swiper 滑动（横滑模式）与长按选词仍按原逻辑工作
+        .parallelGesture(
+          PanGesture({ fingers: 1, direction: PanDirection.Horizontal })
+            .onActionStart((event: GestureEvent) => {
+              const finger = event.fingerList.length > 0 ? event.fingerList[0] : undefined;
+              this.onFlipStart(finger !== undefined ? finger.localY : -1);
+            })
+            .onActionUpdate((event: GestureEvent) => {
+              this.onFlipUpdate(event.offsetX);
+            })
+            .onActionEnd((event: GestureEvent) => {
+              this.onFlipEnd(event.velocityX);
+            })
+            .onActionCancel(() => {
+              this.onFlipCancel();
+            })
+        )
+
+        ReaderFooter({
+          progressText: this.footerProgress(),
+          chapterText: this.footerChapter(),
+          badgeBg: this.dividerColor,
+          subTextColor: this.subTextColor,
+          showClock: this.showFooterTime
+        })
       }
       .width('100%')
-      .layoutWeight(1)
-      // parallelGesture 不抢子组件手势：Swiper 滑动（横滑模式）与长按选词仍按原逻辑工作
-      .parallelGesture(
-        PanGesture({ fingers: 1, direction: PanDirection.Horizontal })
-          .onActionStart(() => {
-            this.onFlipStart();
-          })
-          .onActionUpdate((event: GestureEvent) => {
-            this.onFlipUpdate(event.offsetX);
-          })
-          .onActionEnd((event: GestureEvent) => {
-            this.onFlipEnd(event.velocityX);
-          })
-          .onActionCancel(() => {
-            this.onFlipCancel();
-          })
-      )
-
-      ReaderFooter({
-        progressText: this.footerProgress(),
-        chapterText: this.footerChapter(),
-        badgeBg: this.dividerColor,
-        subTextColor: this.subTextColor,
-        showClock: this.showFooterTime
-      })
-    }
-    .width('100%')
-    .height('100%')
-    .backgroundColor(this.bgColor)
-    .onAreaChange((oldValue: Area, newValue: Area) => {
+      .height('100%')
+      .backgroundColor(this.bgColor)
+      // 仿真翻页按这个 id 抓整页位图（含页眉章节名与页脚时间/进度）
+      .id(FLIP_PAGE_ID)
+      .onAreaChange((oldValue: Area, newValue: Area) => {
       const width = Number.parseFloat(String(newValue.width));
       const height = Number.parseFloat(String(newValue.height));
       if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
@@ -1745,8 +2098,28 @@ export struct TextReaderView {
         }
       }
     })
+    .onTouch((event: TouchEvent) => {
+      this.trackTouchMove(event);
+    })
     .onClick((event: ClickEvent) => {
       this.handleTap(event);
     })
+
+      // 仿真翻页层：盖住整个页面（页眉页脚一起翻），不拦截触摸
+      if (this.mode === ReadingMode.HORIZONTAL && this.pageTurn === PageTurnMode.SIMULATION) {
+        Canvas(this.flipCtx)
+          .width('100%')
+          .height('100%')
+          .backgroundColor(Color.Transparent)
+          .hitTestBehavior(HitTestMode.None)
+          .onReady(() => {
+            this.flipCanvasReady = true;
+            this.drawFlipAt(this.flipProgress);
+          })
+      }
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.bgColor)
   }
 }
