@@ -1,5 +1,6 @@
 import { AppEnv, AppEnvStore } from '../model/AppEnv';
 import { ConfigurationConstant } from '@kit.AbilityKit';
+import { curves } from '@kit.ArkUI';
 import { BookMeta } from '../model/BookModels';
 import { ShelfTheme, ShelfThemeColors } from '../theme/ShelfTheme';
 import { BookCover } from './BookCover';
@@ -7,14 +8,24 @@ import { BookCover } from './BookCover';
 // 封面下方的书名标签：字号 13，最多两行，行高固定以便同排卡片对齐
 const LABEL_FONT_SIZE = 13;
 const LABEL_LINE_HEIGHT = 17;
+// 聚焦 / 按压反馈的弹簧曲线：response 拉到 0.5，比默认明显更慢、回弹更足
+const PRESS_ANIM: AnimateParam = { curve: curves.springMotion(0.5, 0.82) };
+// 长按聚焦时封面的放大倍率（此时整页其余内容被雾化）
+const FOCUSED_COVER_SCALE = 1.18;
+// 手指按下的即时反馈倍率（还未越过长按阈值）
+const PRESSED_COVER_SCALE = 1.06;
 
 @ComponentV2
 export struct BookCard {
   @Param book: BookMeta = new BookMeta();
   @Param selecting: boolean = false;
   @Param selected: boolean = false;
+  // 长按聚焦：整页雾化时只有这一本的封面作为主体清晰放大，书名与进度不显示
+  @Param focused: boolean = false;
   // 封面下方书名标签的实测宽度（vp）
   @Local labelWidth: number = 0;
+  // 按下态：驱动封面斜向高光带（点按即时反馈）
+  @Local pressed: boolean = false;
   @Event onOpen: (book: BookMeta) => void = (book: BookMeta): void => {};
   @Event onLongPress: (book: BookMeta) => void = (book: BookMeta): void => {};
   @Event onSelect: (book: BookMeta) => void = (book: BookMeta): void => {};
@@ -40,6 +51,35 @@ export struct BookCard {
     if (next.key !== this.palette.key) {
       this.palette = next;
     }
+  }
+
+  /** 封面缩放倍率：缩放主体只有封面，下方的书名与进度不参与 */
+  private coverScale(): number {
+    if (this.selecting) {
+      return 1;
+    }
+    if (this.focused) {
+      return FOCUSED_COVER_SCALE;
+    }
+    if (this.pressed) {
+      return PRESSED_COVER_SCALE;
+    }
+    return 1;
+  }
+
+  /**
+   * 封面放大后向上抬起自身溢出的那一半（百分比相对封面自身高度）。
+   * 缩放默认是绕中心放大，若不抬，封面底边会向文字区多长出半截，
+   * 与下方的隐形容名区叠在一起，视觉上就是封面和菜单之间那条难看的大缝隙。
+   */
+  private coverLiftRatio(): string {
+    const extra = (this.coverScale() - 1) / 2;
+    return `${-extra * 100}%`;
+  }
+
+  /** 长按聚焦时只留封面：书名与进度整块撤出布局（否则会在封面和菜单之间留出一段死白） */
+  private labelVisible(): Visibility {
+    return this.focused && !this.selecting ? Visibility.None : Visibility.Visible;
   }
 
   private displayTitle(): string {
@@ -133,10 +173,37 @@ export struct BookCard {
       Column() {
         // 封面与分组卡的 2×2 缩略封面共用同一套绘制逻辑
         Column() {
-          BookCover({ book: this.book, showTypeBadge: !this.selecting })
+          Stack({ alignContent: Alignment.Center }) {
+            BookCover({ book: this.book, showTypeBadge: !this.selecting })
+            // 按压高光：斜向半透明白带，按下时淡入并右移，制造封面被光扫过的质感
+            if (!this.selecting) {
+              Column()
+                .width('100%')
+                .height('100%')
+                .linearGradient({
+                  angle: 115,
+                  colors: [['#00FFFFFF', 0.0], ['#33FFFFFF', 0.42], ['#0DFFFFFF', 0.58], ['#00FFFFFF', 1.0]]
+                })
+                .translate({ x: this.pressed || this.focused ? 16 : -14 })
+                .opacity(this.pressed || this.focused ? 1 : 0)
+                .animation(PRESS_ANIM)
+                .hitTestBehavior(HitTestMode.None)
+            }
+          }
+          .width('100%')
+          .height('100%')
         }
         .width('100%')
         .aspectRatio(0.72)
+        // 只有封面作为主体放大：长按聚焦时最大，手指刚按下时给一点即时反馈。
+        // 绕中心放大后整体上抬溢出的那一半，让封面底边始终停在原位，不压占下方文字区
+        .scale({
+          x: this.coverScale(),
+          y: this.coverScale()
+        })
+        .translate({ y: this.coverLiftRatio() })
+        .zIndex(this.focused && !this.selecting ? 5 : (this.pressed && !this.selecting ? 3 : 0))
+        .animation(PRESS_ANIM)
 
         // 书名最多两行：切点按实测宽度算，末行不留孤字；固定两行高度保证同排卡片进度行对齐
         Column() {
@@ -159,7 +226,7 @@ export struct BookCard {
             this.labelWidth = width;
           }
         })
-
+        .visibility(this.labelVisible())
         Text(this.progressText())
           .width('100%')
           .fontSize(11)
@@ -167,10 +234,18 @@ export struct BookCard {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .margin({ top: 2 })
+          .visibility(this.labelVisible())
       }
       .width('100%')
       .margin({ bottom: 18 })
+      .onTouch((event: TouchEvent) => {
+        const down = event.type === TouchType.Down || event.type === TouchType.Move;
+        if (this.pressed !== down) {
+          this.pressed = down;
+        }
+      })
       .onClick(() => {
+        this.pressed = false;
         this.tapCard();
       })
       .gesture(

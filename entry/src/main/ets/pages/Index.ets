@@ -107,6 +107,8 @@ struct Index {
   @Local profileRefresh: number = 0;
   // 顶部浮动栏实测高度：内容区用它做首屏留白，滚动后内容才能滑进模糊区
   @Local topBarHeight: number = 0;
+  // 底部导航胶囊实测宽度：选中滑块按三等分定位
+  @Local tabBarWidth: number = 0;
   // 深色模式：EntryAbility 在创建与配置变更时写入，页面只做消费
   // App 级环境（系统深浅色 / 皮肤）：@ComponentV2 不支持 @StorageProp，改用 @ObservedV2 单例
   @Local env: AppEnv = AppEnvStore.get();
@@ -1455,18 +1457,40 @@ struct Index {
     .height(48)
     .justifyContent(FlexAlign.Center)
     .borderRadius(24)
-    .backgroundColor(this.currentTab === index ? this.palette.accent : '#00000000')
     .onClick(() => {
       this.switchTab(index);
     })
   }
 
+  /** 选中胶囊的单段宽度：导航胶囊内容区三等分（实测宽度减掉左右各 4vp 内边距） */
+  private tabSliderWidth(): number {
+    if (this.tabBarWidth <= 0) {
+      return 0;
+    }
+    return (this.tabBarWidth - 8) / 3;
+  }
+
   @Builder
   tabBar() {
-    Row() {
-      this.tabItem(TAB_BOOKSHELF, '书架')
-      this.tabItem(TAB_DISCOVER, '发现')
-      this.tabItem(TAB_PROFILE, '我的')
+    Stack({ alignContent: Alignment.Start }) {
+      // 选中胶囊：随 currentTab 平移，替代原来「三段各自点亮」的硬切换
+      Column()
+        .width(this.tabSliderWidth())
+        .height(48)
+        .borderRadius(24)
+        .backgroundColor(this.palette.accent)
+        .shadow({ radius: 14, color: this.palette.accentSoft, offsetX: 0, offsetY: 5 })
+        .translate({ x: this.tabSliderWidth() * this.currentTab })
+        .animation({ curve: curves.springMotion(0.32, 0.78) })
+        .visibility(this.tabSliderWidth() > 0 ? Visibility.Visible : Visibility.Hidden)
+
+      Row() {
+        this.tabItem(TAB_BOOKSHELF, '书架')
+        this.tabItem(TAB_DISCOVER, '发现')
+        this.tabItem(TAB_PROFILE, '我的')
+      }
+      .width('100%')
+      .height(48)
     }
     .width('80%')
     .constraintSize({ maxWidth: 380 })
@@ -1481,6 +1505,12 @@ struct Index {
     .margin({ bottom: this.bottomInset + TAB_BAR_MARGIN })
     // 原为 blur(8)：对已做 backdropBlur 的层再模糊是双重离屏渲染，改用透明度淡出
     .opacity(this.managing ? 0.4 : 1)
+    .onAreaChange((oldValue: Area, newValue: Area) => {
+      const width = Number(newValue.width);
+      if (width > 0 && Math.abs(width - this.tabBarWidth) > 0.5) {
+        this.tabBarWidth = width;
+      }
+    })
   }
 
   /**
@@ -1600,6 +1630,8 @@ struct Index {
                       book: item,
                       selecting: this.selecting,
                       selected: this.isSelected(item.id),
+                      // 长按聚焦：只有这本的封面放大清晰，其余内容（含书名 / 进度）淡出
+                      focused: this.managing && this.manageTargetId === item.id,
                       onOpen: (book: BookMeta): void => {
                         this.openBook(book);
                       },
@@ -1616,18 +1648,18 @@ struct Index {
                     })
                   }
                   .width('100%')
+                  // 聚焦卡的缩放交给 BookCard 内部的封面自己完成，这里只负责整页雾化
                   .blur(this.managing && this.manageTargetId !== item.id ? 8 : 0)
                   .opacity(this.managing && this.manageTargetId !== item.id ? 0.5 : 1)
-                  .scale({
-                    x: this.managing && this.manageTargetId === item.id ? 1.1 : 1,
-                    y: this.managing && this.manageTargetId === item.id ? 1.1 : 1
-                  })
                   .zIndex(this.managing && this.manageTargetId === item.id ? 2 : 0)
+                  // 聚焦卡不加描边：封面已放大越出原格，描边会横穿封面；清晰度本身已足够区分
                   .outline({
-                    width: this.managing && this.manageTargetId === item.id ? 2 : 0,
+                    width: 0,
                     color: this.palette.accent,
                     radius: 16
                   })
+                  // 雾化 / 描边与封面放大共用同一条慢弹簧，进出管理态是一段连续过渡
+                  .animation({ curve: curves.springMotion(0.5, 0.82) })
                   .bindPopup(this.managing && this.manageTargetId === item.id
                     && !this.groupSheetVisible && !this.newGroupVisible, {
                     builder: this.bookActionMenu,
