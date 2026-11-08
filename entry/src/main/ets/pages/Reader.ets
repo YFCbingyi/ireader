@@ -111,8 +111,6 @@ struct Reader {
   @Local pullOffset: number = 0;
   @Local pullReached: boolean = false;
   private pullTracking: boolean = false;
-  private pullStartX: number = 0;
-  private pullStartY: number = 0;
   @Local theme: ReadingTheme = ReadingTheme.EYE;
   @Local palette: ReaderThemeColors = ReaderTheme.eye();
   // 图片书面板专用深色色板：只建一次，避免每次渲染都给子组件传新对象导致整面板重建
@@ -768,53 +766,57 @@ struct Reader {
   /**
    * 下拉切换书签：只在顶部页眉区起手（正文滚动 / 翻页不受影响），
    * 向下越过阈值即"蓄力"，松手前上滑回退就取消，松手才真正执行。
+   *
+   * 用垂直 PanGesture 而不是裸 onTouch：翻页的横向 PanGesture 一旦识别，
+   * 会给 onTouch 发 Cancel，下拉就整段作废（表现为「翻页过程中下拉没反应」）。
+   * 两个方向的手势交给系统竞争，谁的方向先成立谁接管。
    */
-  private handlePullTouch(event: TouchEvent): void {
+  private beginPull(): void {
     if (!this.canPullBookmark()) {
-      this.resetPull();
       return;
     }
-    if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
-      // 系统若因其它手势胜出发来 Cancel，已越过阈值也照样执行，避免"拉了没反应"
-      const fire: boolean = this.pullTracking && this.pullReached;
-      this.resetPull();
-      if (fire) {
-        this.toggleBookmark();
-      }
+    // 左右模式没有纵向滚动，整页任意位置起手都算下拉
+    this.pullTracking = true;
+    this.pullReached = false;
+    this.pullOffset = 0;
+    this.updateBookmarkState();
+  }
+
+  private updatePull(offsetY: number): void {
+    if (!this.pullTracking) {
       return;
     }
-    const touch: TouchObject | undefined = event.touches[0];
-    if (touch === undefined) {
-      return;
-    }
-    if (event.type === TouchType.Down) {
-      // 左右模式没有纵向滚动，整页任意位置起手都算下拉
-      this.pullTracking = true;
-      this.pullReached = false;
-      this.pullOffset = 0;
-      this.pullStartX = touch.x;
-      this.pullStartY = touch.y;
-      this.updateBookmarkState();
-      return;
-    }
-    if (event.type !== TouchType.Move || !this.pullTracking) {
-      return;
-    }
-    const dy: number = touch.y - this.pullStartY;
-    const dx: number = Math.abs(touch.x - this.pullStartX);
-    if (dy <= 0 || dx > dy) {
+    if (offsetY <= 0) {
       this.pullOffset = 0;
       this.pullReached = false;
       return;
     }
-    this.pullOffset = Math.min(dy, BOOKMARK_PULL_MAX);
-    const reached: boolean = dy >= BOOKMARK_PULL_TRIGGER;
+    this.pullOffset = Math.min(offsetY, BOOKMARK_PULL_MAX);
+    const reached: boolean = offsetY >= BOOKMARK_PULL_TRIGGER;
     if (reached !== this.pullReached) {
       // 阈值跨越用弹簧过渡：丝带提亮 / 缩放 / 光晕是连续反馈，不是硬切
       this.getUIContext().animateTo({ curve: curves.springMotion(0.32, 0.78) }, () => {
         this.pullReached = reached;
       });
     }
+  }
+
+  private endPull(): void {
+    if (!this.pullTracking) {
+      return;
+    }
+    const fire: boolean = this.pullReached;
+    this.resetPull();
+    if (fire) {
+      this.toggleBookmark();
+    }
+  }
+
+  private cancelPull(): void {
+    if (!this.pullTracking) {
+      return;
+    }
+    this.resetPull();
   }
 
   private pullHintLabel(): string {
@@ -2155,14 +2157,28 @@ struct Reader {
 
       if (this.canPullBookmark()) {
         // 透明手势层置于最上层：Transparent 保证自己收到完整触摸流，
-        // 同时被它遮住的正文/翻页/长按仍照常命中，不影响原有交互
+        // 同时被它遮住的正文/翻页/长按仍照常命中，不影响原有交互。
+        // 手势用垂直 PanGesture：与正文的横向翻页 PanGesture 由系统按方向竞争，
+        // 否则横向手势一旦识别就会 Cancel 掉触摸流，下拉书签直接失效。
         Column()
           .width('100%')
           .height('100%')
           .hitTestBehavior(HitTestMode.Transparent)
-          .onTouch((event: TouchEvent) => {
-            this.handlePullTouch(event);
-          })
+          .gesture(
+            PanGesture({ fingers: 1, direction: PanDirection.Vertical, distance: 6 })
+              .onActionStart(() => {
+                this.beginPull();
+              })
+              .onActionUpdate((event: GestureEvent) => {
+                this.updatePull(event.offsetY);
+              })
+              .onActionEnd(() => {
+                this.endPull();
+              })
+              .onActionCancel(() => {
+                this.cancelPull();
+              })
+          )
       }
     }
     .width('100%')

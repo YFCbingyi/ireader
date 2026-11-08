@@ -72,8 +72,7 @@ entry/src/main/ets/
 │   ├── DiscoverPanel.ets     # 发现页占位
 │   ├── ProfilePanel.ets      # 「我的」页：时长 / 继续阅读 / 习惯统计 / 热力图 / 笔记 / 设置与备份
 │   └── reader/
-│       ├── TextReaderView.ets   # 文本书：竖排块窗口 + 左右页窗口 + 仿真翻页手势
-│       ├── FlipOverlay.ets      # 仿真翻页视觉层：Canvas 绘制目标页位图 + 当前页平移 + 卷边阴影
+│       ├── TextReaderView.ets   # 文本书：竖排块窗口 + 左右页窗口 + 仿真翻页（手势 + Canvas 折纸）
 │       ├── ImageReaderView.ets  # 图片书：竖排图片块窗口 + 左右图片页窗口
 │       ├── ImageDataSource.ets  # ImagePage + 跨章图片页数据源
 │       └── ReaderPanels.ets     # 目录（书名 + 目录/笔记 tab + 30 章分档）/ 书签 / 阅读设置 / 全文搜索
@@ -248,7 +247,7 @@ aboutToAppear
 |---|---|---|
 | Engine | 页序列 / 块序列、章范围、缓存 LRU、锚点查找 | `reader/PageWindow.ets`、`reader/BlockWindow.ets` |
 | Strategy | 拖动状态机（方向 / 进度 / 是否抓目标页） | `reader/FlipStateMachine.ets` |
-| Container | Swiper（左右）、List（竖排）、Canvas 卷曲层 | `TextReaderView.ets`、`FlipOverlay.ets` |
+| Container | Swiper（左右）、List（竖排）、Canvas 折纸层 | `TextReaderView.ets` |
 
 ### 8.1 竖排：跨章块窗口
 
@@ -316,25 +315,44 @@ class PagedItem { key: `${chapter}_${pageIndex}`; chapter; pageIndex; text; star
 - **页脚**：右侧 `x/y章`（无进度时回退 `第 x/y 章 · z%`），不含页号；左侧为时间 + 电量角标，受 `settings.showFooterTime` 控制显隐。
 - **点击分区**（`handleTap`）：左侧 30% 上一页、右侧 30% 下一页（`turnPage`），中间 40% 唤起控制栏。翻页到达窗口端部时先 `await` 补章，再延迟 60ms 越过 `beginPageSync` 锁执行 `changeIndex(..., true)`。
 
-### 8.3 仿真翻页（卷曲）
+### 8.3 仿真翻页（折纸）
 
-`PageTurnMode.SIMULATION` 不再复用 Swiper 的滑动动画，改为**手势接管 + 位图卷曲**：
+`PageTurnMode.SIMULATION` 不再复用 Swiper 的滑动动画，改为**手势接管 + 位图折纸**：
 
 1. Swiper 在仿真模式下 `disableSwipe(true)`，只负责 `changeIndex` 切索引；
 2. 容器上挂 `parallelGesture(PanGesture(Horizontal))`，不抢子组件手势；
-3. 手势起点 `getUIContext().getComponentSnapshot().get('reader_page_{index}')` 抓当前页位图，
+3. 手势起点 `getUIContext().getComponentSnapshot().get(FLIP_PAGE_ID)` 抓**整页**位图（含页眉章节名与页脚时间进度），
    方向确定后再抓目标页位图（`FlipStateMachine` 只在方向首次确定/反转时返回 `needTarget`）；
-4. `FlipStateMachine.update()` 把位移换算成 0~1 进度，`FlipOverlay` 每帧绘制：
-   底层铺目标页、上层按 `progress × 页宽` 平移当前页、边缘画卷边阴影与纸张背面高光；
-5. 抬手按「位移 ≥ 30% 或速度 ≥ 320vp/s」判定翻满，`animateTo` 补间到 1（或回弹到 0），
+4. `FlipStateMachine.update()` 把位移换算成 0~1 进度，组件内的 `Canvas` 每帧按「平面折纸」模型绘制：
+   - 整张纸沿一条过手指点的折线镜像翻折，折起的一侧是矩形 ∩ 折线外侧半平面；
+   - 折起部分绕折线镜像后铺纸背白（接近不透明，避免与镜像反字叠成重影），原位置露出下层目标页；
+   - 折线一侧沿法向反方向画渐变投影，模拟纸张离开页面的阴影；
+   - 折线倾角 φ 由**起手点高度**决定：靠上只折起右上角、居中整条右边缘折起（上下各一个书角）、靠下只折起右下角；
+   - 向前翻（上一页）只镜像几何、不镜像画面，页眉页脚文字不会反写；
+5. 抬手按「位移 ≥ 30% 或速度 ≥ 320vp/s」判定翻满，自行插值补间到 1（或回弹到 0），
    落地后 `settleFlip()` 清位图并 `turnPage(dir, silent=true)` 直接切索引。
 
-约束：
+约束（都是实测踩出来的）：
 
-- 两张位图齐备前 `FlipOverlay` 整层不绘制（只画一张会露出空白底，等同闪屏）；
+- **Canvas 必须在本组件内**：`AnimateParam` 没有 `onFrame`，V2 的 `@Monitor` 在动画插值期间不会逐帧回调，
+  隔着子组件传 `@Param` 会退化成「整段动画只画一帧」；补间用组件自己的 `setInterval(16ms)` + 缓动函数驱动。
+- **Canvas 走 px 单位**：`CanvasRenderingContext2D` 用一个 `LengthMetricsUnit.PX` 的实例，
+  源矩形取自 `PixelMap` 的像素坐标，混用 vp 会把源区域缩到左上角一小块再拉伸。
+- **位图不能进状态系统**：`@Local` 会把赋值对象包装成观察代理，`PixelMap` 被代理后 `drawImage` 静默失败；
+  位图存普通字段，就绪后直接调 `drawFlipAt()` 补画。
+- **页组件必须自带背景色**（`.backgroundColor(bgColor)`）：`getComponentSnapshot` 抓的是该节点自身，
+  背景若挂在父级 Stack 上，截出来的位图是透明的，两层叠加就变成文字重影。
+- **拖动之后的抬手不是点击**：`onClick` 在拖动结束后仍会按抬手点走一次分区判定
+  （两侧多翻一页 / 中间唤起控制栏），必须用 `trackTouchMove` 记录按下点与拖动，
+  由 `consumeTapAfterDrag(x, y)` 丢弃"离按下点很远"的点击；反过来，只在抬手时结算标记会把
+  下一次正常点击也吞掉（翻完页点中间打不开控制栏），所以要用"点击点与按下点的距离"判定而不是布尔残留。
+- **下拉书签用垂直 PanGesture**：横向翻页手势一旦识别，会给裸 `onTouch` 发 Cancel，
+  下拉整段作废；两个方向的手势交给系统按方向竞争才互不干扰。
+- 两张位图齐备前整层不绘制（只画一张会露出空白底，等同闪屏）；
 - 位图必须显式 `release()`（`aboutToDisappear` 也释放），否则每翻几页漏两张；
 - 点击两侧翻页同一条路径（`playFlipTo`），动画期间不排队新翻转，避免两张位图交叉；
-- 卷曲是**几何近似**（平移 + 曲线阴影 + 背面高光），不是逐列位图变形——后者在 Canvas 上无法保证 60fps。
+- 折纸是**几何近似**（折线切分 + 镜像纸背 + 渐变投影），不是逐列位图网格变形——后者在 Canvas 上无法保证 60fps；
+  折线最大倾角 / 纸背白化强度 / 投影宽度都在文件顶部的 `FOLD_*` 常量里调。
 
 ### 8.4 长按选词：复制 / 划线 / 想法 / 词典
 
