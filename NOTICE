@@ -1,0 +1,29 @@
+iReader — HarmonyOS ArkTS 阅读器
+Copyright 2026 YFCbingyi
+
+This product includes software developed at the iReader project
+(https://github.com/YFCbingyi/ireader), licensed under the Apache
+License, Version 2.0.
+
+-------------------------------------------------------------------------
+Third-Party Fonts (bundled in entry/src/main/resources/rawfile/fonts/)
+-------------------------------------------------------------------------
+The application bundles the following open-source fonts, each licensed
+under the SIL Open Font License, Version 1.1 (OFL-1.1). The full license
+text and per-font copyright notices are provided in:
+
+    entry/src/main/resources/rawfile/fonts/LICENSE.txt
+
+  - noto-sans-sc.otf      © 2014-2021 Adobe (http://www.adobe.com/)
+  - noto-serif-sc.otf     © 2017-2024 Adobe (http://www.adobe.com/)
+  - lxgw-wenkai.ttf       © 2021-2026 LXGW (https://github.com/lxgw/LxgwWenKai-Lite)
+  - ma-shan-zheng.ttf     © 2018 The Ma Shan Zheng Project Authors
+  - zcool-kuaile.ttf      © 2018 The ZCOOL KuaiLe Project Authors
+  - zcool-xiaowei.ttf     © 2018 The ZCOOL XiaoWei Project Authors
+
+Font sources: github.com/googlefonts/noto-cjk, github.com/lxgw/LxgwWenKai-Lite,
+github.com/google/fonts.
+
+Under OFL-1.1, these fonts may be bundled and redistributed with software
+provided that the copyright notices and the license are retained. The fonts
+themselves may not be released under any other license.

@@ -1,6 +1,7 @@
 {
   "modelVersion": "6.1.1",
-  "description": "Please describe the basic information.",
+  "description": "iReader - HarmonyOS ArkTS 阅读器",
+  "license": "Apache-2.0",
   "dependencies": {
   },
   "devDependencies": {
