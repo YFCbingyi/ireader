@@ -35,6 +35,23 @@ const TAB_BOOKSHELF = 0;
 const TAB_DISCOVER = 1;
 const TAB_PROFILE = 2;
 const TAB_BAR_INSET = 112;
+/*
+ * 底部导航的「果冻」交互参数：
+ *   NAV_GLOW_*      — 手指处发光的光斑尺寸、中心亮点尺寸与固定白色
+ *   NAV_SQUASH_*    — 按压时横向撑开 / 纵向压扁的比例（0.035 / 0.07 ≈ 明显但不散架）
+ *   NAV_MAX_TILT    — 手指到边缘时整条胶囊被带出的最大倾角（度）
+ *   形变回弹用低阻尼弹簧（松手会轻微过冲再定住），见 jellyMotion() / glowMotion()
+ */
+const NAV_GLOW_SIZE = 96;
+const TAB_ITEM_HEIGHT = 48;
+const NAV_GLOW_CORE = 10;
+const NAV_SQUASH_X = 0.035;
+const NAV_SQUASH_Y = 0.07;
+const NAV_MAX_TILT = 1.2;
+const NAV_PADDING = 4;
+// 光斑恒白：不随主题，任何皮肤 / 深浅色下都用这组白色叠透明度
+const NAV_GLOW_COLOR = '#FFFFFF';
+
 // 毛玻璃参数：背景模糊半径。半透明底色随浅/深色主题来自 ShelfThemeColors
 // 顶部标题栏整条通栏模糊；底部只有导航胶囊自身模糊
 const BLUR_RADIUS = 20;
@@ -42,6 +59,14 @@ const TAB_BAR_HEIGHT = 56;
 const TAB_BAR_MARGIN = 16;
 // 书架内容筛选：全部 / 文本书 / 图片书
 const FILTER_ALL = 0;
+// 顶部筛选条的果冻态参数：条高 / 内边距 / 起拖阈值 / 形变幅度
+const FILTER_BAR_HEIGHT = 42;
+const FILTER_PADDING = 4;
+const FILTER_DRAG_SLOP = 6;
+const FILTER_SQUASH_X = 0.02;
+const FILTER_SQUASH_Y = 0.04;
+const FILTER_MAX_TILT = 1;
+const FILTER_STRETCH = 0.08;
 const FILTER_TEXT = 1;
 const FILTER_IMAGE = 2;
 // 导入上限：一次最多选 100 个文件；选文件夹时扫描结果同样按此上限截断
@@ -154,11 +179,38 @@ struct Index {
   @Local profileRefresh: number = 0;
   // 顶部浮动栏实测高度：内容区用它做首屏留白，滚动后内容才能滑进模糊区
   @Local topBarHeight: number = 0;
-  // 底部导航胶囊实测宽度：选中滑块按三等分定位
+  // 顶部筛选胶囊：实测宽度用来三等分算滑块位置；拖动中胶囊跟手，松手才生效
+  @Local filterBarWidth: number = 0;
+  @Local filterDragging: boolean = false;
+  /** 拖动中胶囊左边缘的偏移（相对内容区左边界） */
+  @Local filterCapX: number = 0;
+  /** 拖动中胶囊压住的那一段：松手生效 */
+  @Local filterPending: number = -1;
+  @Local filterSquash: number = 0;
+  @Local filterTilt: number = 0;
+  @Local filterStretch: number = 0;
+  /** 按下点：位移超过阈值才算拖胶囊 */
+  private filterDownX: number = -1;
+  private filterDownY: number = 0;
+  /** 按下后的最大位移（横竖都算）：决定松手是点击还是拖拽 */
+  private filterMoveMax: number = 0;
+  /** 手指在筛选条上按着：期间冻结书架列表的滚动（顶栏是 Transparent，列表也会收到这串触摸） */
+  @Local filterTouching: boolean = false;
+  // 底部导航胶囊实测宽度：用来算牵引中心（半个宽度 = 拉力 1）
   @Local tabBarWidth: number = 0;
   // 书架网格的滚动进度（量化到 1/12，避免每帧重建顶栏）：0 = 顶栏全透明，1 = 皮肤原生毛玻璃
   @Local topBarReveal: number = 0;
   private shelfScroller: Scroller = new Scroller();
+  /*
+   * 底部导航的“水滴”交互：手指按下发光。光斑只跟手指的 X，且始终压在导航栏中线上；
+   * 颜色恒为白，任何皮肤 / 深浅色下都一样。
+   */
+  @Local navGlowVisible: boolean = false;
+  @Local navGlowX: number = 0;
+  /** 0 = 未按压，1 = 按到底：驱动横向撑开 / 纵向压扁 */
+  @Local navSquash: number = 0;
+  /** 整条导航被手指“带”的倾角（度） */
+  @Local navTilt: number = 0;
   // 循环动效的两个开关：onAppear 后翻一次，配合 iterations:-1 + Alternate 变成无限呼吸
   @Local overlayPulse: boolean = false;
   @Local illustrationBreath: boolean = false;
@@ -762,8 +814,169 @@ struct Index {
     return '';
   }
 
+  /** 解析 #RRGGBB / #AARRGGBB 为 [r, g, b]，解析不了按纯黑兜底 */
+  private rgbOf(hex: string): number[] {
+    let body = hex.startsWith('#') ? hex.substring(1) : hex;
+    if (body.length === 8) {
+      body = body.substring(2);
+    }
+    if (body.length !== 6) {
+      return [0, 0, 0];
+    }
+    const r = Number.parseInt(body.substring(0, 2), 16);
+    const g = Number.parseInt(body.substring(2, 4), 16);
+    const b = Number.parseInt(body.substring(4, 6), 16);
+    if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) {
+      return [0, 0, 0];
+    }
+    return [r, g, b];
+  }
+
+  /** 相对亮度（0 = 纯黑，1 = 纯白） */
+  private lumaOf(hex: string): number {
+    const rgb = this.rgbOf(hex);
+    return (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255;
+  }
+
+  /** 毛玻璃背后是亮是暗：决定图标文字该用黑还是白 */
+  private navOnLightBackdrop(): boolean {
+    return this.lumaOf(this.palette.bg) > 0.5;
+  }
+
+  /** 常态：背后暗 → 白，背后亮 → 黑；选中态：纯主题色 */
   private tabColor(index: number): string {
-    return this.currentTab === index ? this.palette.accentText : this.palette.tabIdle;
+    if (this.currentTab === index) {
+      return this.palette.accent;
+    }
+    return this.navOnLightBackdrop() ? '#141210' : '#FFFFFF';
+  }
+
+  /** 顶部筛选条的单段宽度：内容区三等分 */
+  private filterSegmentWidth(): number {
+    if (this.filterBarWidth <= 0) {
+      return 0;
+    }
+    return (this.filterBarWidth - FILTER_PADDING * 2) / 3;
+  }
+
+  /** 高亮跟谁走：拖动中跟胶囊所在段，否则跟当前筛选 */
+  private filterHighlight(): number {
+    return this.filterDragging && this.filterPending >= 0 ? this.filterPending : this.bookFilter;
+  }
+
+  /** 内容坐标落在哪一段（首尾夹紧），给点击用 */
+  private filterIndexAt(contentX: number): number {
+    const seg = this.filterSegmentWidth();
+    if (seg <= 0) {
+      return -1;
+    }
+    let idx = Math.floor(contentX / seg);
+    if (idx < 0) {
+      idx = 0;
+    } else if (idx > FILTER_IMAGE) {
+      idx = FILTER_IMAGE;
+    }
+    return idx;
+  }
+
+  /** 高亮胶囊左边缘的偏移：拖动中跟手，松手滑回目标段 */
+  private filterCapOffset(): number {
+    if (this.filterDragging) {
+      return this.filterCapX;
+    }
+    return this.filterSegmentWidth() * this.bookFilter;
+  }
+
+  /**
+   * 顶部筛选条的果冻交互：胶囊跟手指左右滑，松手才切筛选。
+   * 位移没超过阈值时不算拖动，点击照旧走 onClick。
+   */
+  private onFilterTouch(event: TouchEvent): void {
+    const seg = this.filterSegmentWidth();
+    if (seg <= 0) {
+      return;
+    }
+    if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      const target = this.filterPending;
+      const wasDragging = this.filterDragging;
+      const downX = this.filterDownX;
+      const movedMax = this.filterMoveMax;
+      this.filterDragging = false;
+      this.filterPending = -1;
+      this.filterSquash = 0;
+      this.filterTilt = 0;
+      this.filterStretch = 0;
+      this.filterDownX = -1;
+      this.filterTouching = false;
+      if (event.type === TouchType.Up) {
+        // 松手生效：拖过就落在胶囊压着的段；几乎没动才当点击，按点在哪一段
+        let hit = -1;
+        if (wasDragging) {
+          hit = target;
+        } else if (movedMax < FILTER_DRAG_SLOP) {
+          hit = this.filterIndexAt(downX);
+        }
+        if (hit >= 0 && hit !== this.bookFilter) {
+          this.changeFilter(hit);
+        }
+      }
+      return;
+    }
+    if (event.touches.length === 0) {
+      return;
+    }
+    const contentX = event.touches[0].x - FILTER_PADDING;
+    const contentY = event.touches[0].y - FILTER_PADDING;
+    if (event.type === TouchType.Down) {
+      this.filterDownX = contentX;
+      this.filterDownY = contentY;
+      this.filterMoveMax = 0;
+      this.filterTouching = true;
+      return;
+    }
+    // 竖直方向滑出去再松手，不该被当成"点了某一段"
+    const moved = Math.max(Math.abs(contentX - this.filterDownX), Math.abs(contentY - this.filterDownY));
+    if (moved > this.filterMoveMax) {
+      this.filterMoveMax = moved;
+    }
+    if (!this.filterDragging) {
+      if (this.filterDownX < 0 || Math.abs(contentX - this.filterDownX) < FILTER_DRAG_SLOP) {
+        return;
+      }
+      this.filterDragging = true;
+    }
+    // 胶囊左边缘跟手，夹在首尾两段之内
+    let capX = contentX - seg / 2;
+    const maxX = seg * 2;
+    if (capX < 0) {
+      capX = 0;
+    } else if (capX > maxX) {
+      capX = maxX;
+    }
+    this.filterCapX = capX;
+    let idx = Math.floor((capX + seg / 2) / seg);
+    if (idx < 0) {
+      idx = 0;
+    } else if (idx > FILTER_IMAGE) {
+      idx = FILTER_IMAGE;
+    }
+    this.filterPending = idx;
+    // 果冻：越靠边撑得越开、压得越扁，并带出一点倾角
+    const half = seg * 1.5;
+    const dx = capX + seg / 2 - half;
+    let pull = Math.abs(dx) / Math.max(1, half);
+    if (pull > 1) {
+      pull = 1;
+    }
+    this.filterSquash = pull;
+    this.filterStretch = FILTER_STRETCH * pull;
+    let nx = dx / Math.max(1, half);
+    if (nx < -1) {
+      nx = -1;
+    } else if (nx > 1) {
+      nx = 1;
+    }
+    this.filterTilt = nx * FILTER_MAX_TILT;
   }
 
   private switchTab(index: number): void {
@@ -1110,16 +1323,16 @@ struct Index {
     Row({ space: 5 }) {
       Text(label)
         .fontSize(14)
-        .fontWeight(this.bookFilter === filter ? FontWeight.Medium : FontWeight.Normal)
-        .fontColor(this.bookFilter === filter ? this.palette.accentText : this.palette.tabIdle)
+        .fontWeight(this.filterHighlight() === filter ? FontWeight.Medium : FontWeight.Normal)
+        .fontColor(this.filterHighlight() === filter ? this.palette.accentText : this.palette.tabIdle)
         .maxLines(1)
       Text(`${this.countOf(filter)}`)
         .fontSize(11)
         .fontWeight(FontWeight.Medium)
-        .fontColor(this.bookFilter === filter ? this.palette.accent : this.palette.tabIdle)
+        .fontColor(this.filterHighlight() === filter ? this.palette.accent : this.palette.tabIdle)
         .padding({ left: 6, right: 6, top: 1, bottom: 2 })
         .borderRadius(8)
-        .backgroundColor(this.bookFilter === filter ? this.palette.accentText : this.palette.chipBg)
+        .backgroundColor(this.filterHighlight() === filter ? this.palette.accentText : this.palette.chipBg)
         .maxLines(1)
     }
     .layoutWeight(1)
@@ -1127,33 +1340,57 @@ struct Index {
     .justifyContent(FlexAlign.Center)
     .alignItems(VerticalAlign.Center)
     .borderRadius(17)
-    .backgroundColor(this.bookFilter === filter ? this.palette.accent : '#00000000')
-    .shadow({
-      radius: this.bookFilter === filter ? 8 : 0,
-      color: this.bookFilter === filter ? this.palette.accentSoft : '#00000000',
-      offsetX: 0,
-      offsetY: this.bookFilter === filter ? 3 : 0
-    })
-    .onClick(() => {
-      this.changeFilter(filter);
-    })
   }
 
   /** 书架内容筛选胶囊导航：全部 / 文本书 / 图片书（各段带实时数量徽标） */
   @Builder
   filterBar() {
-    Row() {
-      this.filterItem(FILTER_ALL, '书架')
-      this.filterItem(FILTER_TEXT, '文本')
-      this.filterItem(FILTER_IMAGE, '图书')
+    Stack({ alignContent: Alignment.Start }) {
+      // 高亮胶囊：拖动中跟手指左右滑，松手滑回目标段（位置走 Motion.quick）
+      Column()
+        .width(this.filterSegmentWidth())
+        .height(34)
+        .borderRadius(17)
+        .backgroundColor(this.palette.accent)
+        .shadow({ radius: 8, color: this.palette.accentSoft, offsetX: 0, offsetY: 3 })
+        .translate({ x: this.filterCapOffset() })
+        .scale({ x: 1 + this.filterStretch, y: 1 - this.filterStretch * 0.5 })
+        .animation(Motion.quick())
+        .visibility(this.filterSegmentWidth() > 0 ? Visibility.Visible : Visibility.Hidden)
+
+      Row() {
+        this.filterItem(FILTER_ALL, '书架')
+        this.filterItem(FILTER_TEXT, '文本')
+        this.filterItem(FILTER_IMAGE, '图书')
+      }
+      .width('100%')
+      .height(34)
     }
     .width('100%')
-    .height(42)
-    .padding(4)
+    .height(FILTER_BAR_HEIGHT)
+    .padding(FILTER_PADDING)
     .borderRadius(21)
     .backgroundColor(this.palette.surfaceAlt)
     .border({ width: 1, color: this.palette.chipBg })
     .shadow({ radius: 12, color: this.palette.accentShadow, offsetX: 0, offsetY: 4 })
+    .onAreaChange((oldValue: Area, newValue: Area) => {
+      const width = Number(newValue.width);
+      if (width > 0 && Math.abs(width - this.filterBarWidth) > 0.5) {
+        this.filterBarWidth = width;
+      }
+    })
+    // 果冻形变：拖动时按偏离中心的程度撑开/压扁并带一点倾角，松手低阻尼回弹
+    .scale({
+      x: 1 + FILTER_SQUASH_X * this.filterSquash,
+      y: 1 - FILTER_SQUASH_Y * this.filterSquash
+    })
+    .rotate({ angle: this.filterTilt })
+    .animation(this.jellyMotion())
+    // 按在筛选条上时吃掉触摸：手指滑到下方书架区，列表也不会跟着滚
+    .hitTestBehavior(HitTestMode.Block)
+    .onTouch((event: TouchEvent) => {
+      this.onFilterTouch(event);
+    })
   }
 
   /** 操作项图标：0 多选 / 1 分组至 / 2 删除 */
@@ -1917,15 +2154,81 @@ struct Index {
   /** 原手绘几何图标（约 10 个形状图层）改为矢量符号：分层设色 + 选中项播放一次弹跳 */
   @Builder
   tabIcon(index: number) {
-    SymbolGlyph(this.tabSymbol(index))
-      .fontSize(this.currentTab === index ? 20 : 18)
-      .fontColor([this.tabColor(index),
-        this.symbolLayer(this.tabColor(index), this.currentTab === index ? 'B3' : '8C')])
-      .renderingStrategy(SymbolRenderingStrategy.MULTIPLE_OPACITY)
-      .symbolEffect(new BounceSymbolEffect(EffectScope.WHOLE, EffectDirection.UP),
-        this.currentTab === index)
-      .width(22)
-      .height(22)
+    if (this.currentTab === index) {
+      // 选中：SINGLE 渲染把所有图层涂成同一色 → 整枚图标被主题色填满
+      SymbolGlyph(this.tabSymbol(index))
+        .fontSize(20)
+        .fontColor([this.palette.accent])
+        .renderingStrategy(SymbolRenderingStrategy.SINGLE)
+        .symbolEffect(new BounceSymbolEffect(EffectScope.WHOLE, EffectDirection.UP), true)
+        .width(22)
+        .height(22)
+    } else {
+      // 未选中：分层透明度，保留线稿层次
+      SymbolGlyph(this.tabSymbol(index))
+        .fontSize(18)
+        .fontColor([this.tabColor(index), this.symbolLayer(this.tabColor(index), '8C')])
+        .renderingStrategy(SymbolRenderingStrategy.MULTIPLE_OPACITY)
+        .symbolEffect(new BounceSymbolEffect(EffectScope.WHOLE, EffectDirection.UP), false)
+        .width(22)
+        .height(22)
+    }
+  }
+
+  /**
+   * 底部导航的触摸跟踪：只有"按住/拖动"这两个动作会改变发光点与形变，
+   * 坐标是相对导航胶囊的布局坐标（未含缩放的视觉变换）。
+   */
+  /** 整条导航的果冻回弹：低阻尼 → 松手会轻微过冲再定住 */
+  private jellyMotion(): AnimateParam {
+    return Motion.spring(0.42, 0.55);
+  }
+
+  /** 光斑跟手的弹簧：比手指稍慢，形成一点“黏性”拖尾 */
+  private glowMotion(): AnimateParam {
+    return Motion.spring(0.3, 0.72);
+  }
+
+  private onNavTouch(event: TouchEvent): void {
+    if (event.type === TouchType.Up || event.type === TouchType.Cancel) {
+      // 松手：光斑熄灭、形变归零，低阻尼弹簧会带出一下回弹
+      this.navGlowVisible = false;
+      this.navSquash = 0;
+      this.navTilt = 0;
+      return;
+    }
+    if (event.touches.length === 0) {
+      return;
+    }
+    const contentWidth = this.tabBarWidth - NAV_PADDING * 2;
+    const centerX = this.tabBarWidth > 0 ? contentWidth / 2 : 0;
+    // 只看 X：光斑永远躺在导航栏的垂直中线上，纵向拖动不会把它带走
+    let localX = event.touches[0].x - NAV_PADDING;
+    if (localX < 0) {
+      localX = 0;
+    } else if (localX > contentWidth) {
+      localX = contentWidth;
+    }
+    const dx = centerX > 0 ? localX - centerX : 0;
+    const dist = Math.abs(dx);
+    // 牵引强度：半个胶囊宽约为 1，拉到 1.6 封顶
+    const reach = Math.max(1, centerX);
+    let pull = dist / reach;
+    if (pull > 1.6) {
+      pull = 1.6;
+    }
+    this.navGlowX = localX;
+    this.navGlowVisible = true;
+    // 整条导航：随左右偏移带出倾角，并按牵引强度横向撑开 / 纵向压扁
+    let nx = centerX > 0 ? dx / centerX : 0;
+    if (nx < -1) {
+      nx = -1;
+    }
+    if (nx > 1) {
+      nx = 1;
+    }
+    this.navTilt = nx * NAV_MAX_TILT;
+    this.navSquash = pull > 1 ? 1 : pull;
   }
 
   @Builder
@@ -1935,6 +2238,8 @@ struct Index {
       Text(label)
         .fontSize(11)
         .fontColor(this.tabColor(index))
+        // 选中项加粗，配合主题色一起强调
+        .fontWeight(this.currentTab === index ? FontWeight.Bold : FontWeight.Normal)
         .margin({ top: 2 })
     }
     .layoutWeight(1)
@@ -1946,27 +2251,45 @@ struct Index {
     })
   }
 
-  /** 选中胶囊的单段宽度：导航胶囊内容区三等分（实测宽度减掉左右各 4vp 内边距） */
-  private tabSliderWidth(): number {
-    if (this.tabBarWidth <= 0) {
-      return 0;
-    }
-    return (this.tabBarWidth - 8) / 3;
-  }
-
   @Builder
   tabBar() {
     Stack({ alignContent: Alignment.Start }) {
-      // 选中胶囊：随 currentTab 平移，替代原来「三段各自点亮」的硬切换
-      Column()
-        .width(this.tabSliderWidth())
-        .height(48)
-        .borderRadius(24)
-        .backgroundColor(this.palette.accent)
-        .shadow({ radius: 14, color: this.palette.accentSoft, offsetX: 0, offsetY: 5 })
-        .translate({ x: this.tabSliderWidth() * this.currentTab })
-        .animation(Motion.quick())
-        .visibility(this.tabSliderWidth() > 0 ? Visibility.Visible : Visibility.Hidden)
+      // 手指处的发光：径向光晕 + 中心亮点，作为图标的"背光"（不糊住字形）
+      Stack({ alignContent: Alignment.Center }) {
+        Column()
+          .width(NAV_GLOW_SIZE)
+          .height(NAV_GLOW_SIZE)
+          .borderRadius(NAV_GLOW_SIZE / 2)
+          .radialGradient({
+            center: ['50%', '50%'],
+            radius: NAV_GLOW_SIZE / 2,
+            colors: [
+              [this.symbolLayer(NAV_GLOW_COLOR, '3D'), 0.0],
+              [this.symbolLayer(NAV_GLOW_COLOR, '1F'), 0.5],
+              [this.symbolLayer(NAV_GLOW_COLOR, '00'), 1.0]
+            ]
+          })
+        Column()
+          .width(NAV_GLOW_CORE)
+          .height(NAV_GLOW_CORE)
+          .borderRadius(NAV_GLOW_CORE / 2)
+          .backgroundColor(this.symbolLayer(NAV_GLOW_COLOR, '66'))
+      }
+      .width(NAV_GLOW_SIZE)
+      .height(NAV_GLOW_SIZE)
+      // 只跟 X 移动：Y 固定压在导航栏的中线上
+      .position({
+        x: this.navGlowX - NAV_GLOW_SIZE / 2,
+        y: (TAB_ITEM_HEIGHT - NAV_GLOW_SIZE) / 2
+      })
+      .opacity(this.navGlowVisible ? 1 : 0)
+      .scale({
+        x: this.navGlowVisible ? 1 : 0.55,
+        y: this.navGlowVisible ? 1 : 0.55
+      })
+      .hitTestBehavior(HitTestMode.None)
+      // 位置变化走一条稍慢的弹簧：光斑追手指时会有一点"黏性"，像被拖着走
+      .animation(this.glowMotion())
 
       Row() {
         this.tabItem(TAB_BOOKSHELF, '书架')
@@ -1994,6 +2317,18 @@ struct Index {
       if (width > 0 && Math.abs(width - this.tabBarWidth) > 0.5) {
         this.tabBarWidth = width;
       }
+    })
+    // 果冻形变：按压时横向撑开、纵向压扁，并被手指"带"出一点倾角；
+    // animation 只包住这两项，松手用低阻尼弹簧回弹（会轻微过冲再定住）
+    .scale({
+      x: 1 + NAV_SQUASH_X * this.navSquash,
+      y: 1 - NAV_SQUASH_Y * this.navSquash
+    })
+    .rotate({ angle: this.navTilt })
+    .animation(this.jellyMotion())
+    // 手指在哪，光斑就在哪：坐标是相对胶囊的布局坐标
+    .onTouch((event: TouchEvent) => {
+      this.onNavTouch(event);
     })
   }
 
@@ -2172,6 +2507,8 @@ struct Index {
             .layoutWeight(1)
             .padding({ left: 20, right: 20, bottom: this.bottomInset + 24 })
             .scrollBar(BarState.Off)
+            // 手指按在顶部筛选条上（还没松手）时，列表不接受滚动交互
+            .enableScrollInteraction(!this.filterTouching)
             // 顶栏随滚动浮现：读绝对偏移而不是累加增量，回弹/越界都不会漂
             .onDidScroll((scrollOffset: number, scrollState: ScrollState) => {
               this.updateTopBarReveal(this.shelfScroller.currentOffset().yOffset);

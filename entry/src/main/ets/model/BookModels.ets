@@ -175,7 +175,7 @@ export class ReaderSettings {
   // 阅读方向按书类型统一：所有 TXT 共用一套，所有图片书共用另一套，两者互不影响
   textReadingMode: ReadingMode = ReadingMode.VERTICAL;
   imageReadingMode: ReadingMode = ReadingMode.VERTICAL;
-  // 翻页方式同样按书类型统一：TXT 支持仿真/横滑/上下/无动效，图片书只用横滑/上下/无动效
+  // 翻页方式同样按书类型统一：TXT 支持仿真/横滑/上下/无动效，图片书只用横滑/上下
   textPageTurn: PageTurnMode = PageTurnMode.VERTICAL;
   imagePageTurn: PageTurnMode = PageTurnMode.VERTICAL;
   // 正文字体：空串 = 系统默认字体
