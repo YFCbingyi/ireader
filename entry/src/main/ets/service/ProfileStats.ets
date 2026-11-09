@@ -251,8 +251,12 @@ export class ProfileStats {
   /** 最近在读：优先找有进度且未读完的一本，其次退回最近更新的书 */
   static continueBook(books: BookMeta[]): BookMeta | undefined {
     for (let i = 0; i < books.length; i++) {
-      const percent = books[i].progress.percent;
-      if (percent > 0.001 && percent < 0.999) {
+      const progress = books[i].progress;
+      if (progress === undefined) {
+        continue;
+      }
+      const percent = progress.percent;
+      if (Number.isFinite(percent) && percent > 0.001 && percent < 0.999) {
         return books[i];
       }
     }
@@ -261,6 +265,11 @@ export class ProfileStats {
 
   static storageBytes(): number {
     return FileUtil.pathSize(AppPaths.getFilesDir());
+  }
+
+  /** 「我的」页专用：分帧统计，回调里再更新界面，避免同步遍历沙箱卡死输入 */
+  static storageBytesAsync(onDone: (bytes: number, partial: boolean) => void): void {
+    FileUtil.pathSizeAsync(AppPaths.getFilesDir(), onDone);
   }
 
   static formatSize(bytes: number): string {
@@ -289,7 +298,9 @@ export class ProfileStats {
   }
 
   static percentLabel(book: BookMeta): number {
-    return Math.round(Math.max(0, Math.min(1, book.progress.percent)) * 100);
+    const progress = book.progress;
+    const value = progress === undefined || !Number.isFinite(progress.percent) ? 0 : progress.percent;
+    return Math.round(Math.max(0, Math.min(1, value)) * 100);
   }
 
   private static oneDecimal(value: number): number {

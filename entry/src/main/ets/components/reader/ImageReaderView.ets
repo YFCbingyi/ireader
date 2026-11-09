@@ -327,6 +327,8 @@ export struct ImageReaderView {
     if (this.chapterCount <= 0) {
       return;
     }
+    const targetImage = Number.isFinite(imageIndexValue) ? Math.max(0, Math.floor(imageIndexValue)) : 0;
+    const targetRatio = Number.isFinite(ratioValue) ? Math.min(1, Math.max(0, ratioValue)) : 0;
     this.pageSeq++;
     let center = centerChapter;
     if (center < 0) {
@@ -355,18 +357,11 @@ export struct ImageReaderView {
     this.beginPageSync();
     this.dataSource.reset(pages);
     this.pagedReady = true;
-    let ratio = ratioValue;
-    if (ratio < 0) {
-      ratio = 0;
-    }
-    if (ratio > 1) {
-      ratio = 1;
-    }
     this.currentChapter = center;
-    this.currentIndex = imageIndexValue;
-    this.currentImageIndex = imageIndexValue;
-    this.intraRatio = ratio;
-    const index = this.findPageIndex(center, imageIndexValue);
+    this.currentIndex = targetImage;
+    this.currentImageIndex = targetImage;
+    this.intraRatio = targetRatio;
+    const index = this.findPageIndex(center, targetImage);
     this.swipeIndex = index >= 0 ? index : 0;
     this.pagedChapterTitle = this.chapterTitleOf(center);
     this.restoreHorizontal();
@@ -515,16 +510,21 @@ export struct ImageReaderView {
     if (this.chapterCount <= 0) {
       return;
     }
+    // 进度锚点可能来自旧数据，先收敛到合法范围，避免非法值进入 List / 图片块布局
+    const center = Number.isFinite(centerChapter)
+      ? Math.min(this.chapterCount - 1, Math.max(0, Math.floor(centerChapter))) : 0;
+    const targetImage = Number.isFinite(imageIndex) ? Math.max(0, Math.floor(imageIndex)) : 0;
+    const targetRatio = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : 0;
     this.windowSeq++;
     this.verticalReady = true;
     this.anchorBlockChapter = -1;
     this.chapterImages.clear();
     this.chapterBlockCounts.clear();
-    let start = centerChapter - WINDOW_RADIUS;
+    let start = center - WINDOW_RADIUS;
     if (start < 0) {
       start = 0;
     }
-    let end = centerChapter + WINDOW_RADIUS;
+    let end = center + WINDOW_RADIUS;
     if (end > this.chapterCount - 1) {
       end = this.chapterCount - 1;
     }
@@ -540,19 +540,19 @@ export struct ImageReaderView {
     }
     this.blockSource.reset(blocks);
     this.rebuildBlockHeights();
-    this.currentChapter = centerChapter;
-    this.currentImageIndex = imageIndex;
-    this.intraRatio = ratio;
-    const index = this.findBlockIndex(centerChapter, imageIndex);
+    this.currentChapter = center;
+    this.currentImageIndex = targetImage;
+    this.intraRatio = targetRatio;
+    const index = this.findBlockIndex(center, targetImage);
     this.pendingBlockIndex = index >= 0 ? index : 0;
-    this.pendingBlockRatio = ratio;
+    this.pendingBlockRatio = targetRatio;
     this.firstVisibleBlock = this.pendingBlockIndex;
     // 双保险：数据源重置后若 List 可见索引未变、onScrollIndex 不触发，下一帧主动定位
     setTimeout(() => {
       this.consumePendingBlock();
     }, 0);
     hilog.info(LOG_DOMAIN, LOG_TAG, 'initWindow center=%{public}d window=[%{public}d,%{public}d] blocks=%{public}d',
-      centerChapter, this.windowStart, this.windowEnd, blocks.length);
+      center, this.windowStart, this.windowEnd, blocks.length);
   }
 
   private buildChapterBlocks(chapter: number): ImageBlock[] {
@@ -615,8 +615,10 @@ export struct ImageReaderView {
       const block = blocks[i];
       let height = TITLE_BLOCK_HEIGHT;
       if (block.kind === 'image' && block.image !== undefined) {
-        const image = block.image;
-        height = image.width > 0 ? width * image.height / image.width : width;
+        height = this.imageBlockHeight(block.image, width);
+      }
+      if (!Number.isFinite(height) || height <= 0) {
+        height = TITLE_BLOCK_HEIGHT;
       }
       heights.push(height);
       prefix.push(sum);
@@ -636,13 +638,22 @@ export struct ImageReaderView {
     return Math.max(1, this.viewWidth) * this.flowScale;
   }
 
+  /** 宽高异常（旧 manifest 缺宽高 / NaN）时退回方形，绝不把 NaN 传给布局 */
+  private imageBlockHeight(image: ImageEntry, width: number): number {
+    if (!Number.isFinite(image.width) || !Number.isFinite(image.height) ||
+      image.width <= 0 || image.height <= 0) {
+      return width;
+    }
+    return width * image.height / image.width;
+  }
+
   /** 图片块按原始宽高比换算显示高度 */
   private blockImageHeight(block: ImageBlock): number {
     if (block.image === undefined) {
       return this.itemWidth();
     }
-    const width = this.itemWidth();
-    return block.image.width > 0 ? width * block.image.height / block.image.width : width;
+    const height = this.imageBlockHeight(block.image, this.itemWidth());
+    return Number.isFinite(height) && height > 0 ? height : this.itemWidth();
   }
 
   private contentWidthValue(): number {
@@ -691,11 +702,13 @@ export struct ImageReaderView {
   }
 
   private scrollToBlock(index: number, ratio: number): void {
-    this.listScroller.scrollToIndex(index, false, ScrollAlign.START);
-    if (ratio > 0) {
-      const height = index >= 0 && index < this.blockHeights.length ? this.blockHeights[index] : 0;
+    const safeIndex = Number.isFinite(index) ? Math.max(0, Math.floor(index)) : 0;
+    const safeRatio = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : 0;
+    this.listScroller.scrollToIndex(safeIndex, false, ScrollAlign.START);
+    if (safeRatio > 0) {
+      const height = safeIndex < this.blockHeights.length ? this.blockHeights[safeIndex] : 0;
       if (height > 0) {
-        this.listScroller.scrollBy(0, ratio * height);
+        this.listScroller.scrollBy(0, safeRatio * height);
       }
     }
   }
@@ -940,7 +953,8 @@ export struct ImageReaderView {
                   .width('100%')
                   .height(TITLE_BLOCK_HEIGHT)
                   .justifyContent(FlexAlign.Center)
-                } else if (block.image !== undefined) {
+                } else if (block.image !== undefined && block.image.file !== undefined &&
+                  block.image.file.length > 0) {
                   Row() {
                     Image(AppPaths.uri(block.image.file))
                       .width(this.itemWidth())

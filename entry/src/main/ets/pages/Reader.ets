@@ -239,12 +239,19 @@ struct Reader {
     }
     // 文本书的进度锚点只有「章 + 字符偏移」：页码与滚动比例是排版派生值，
     // 字号 / 行距一变就失效，读回来只会落到错位的位置
-    let savedOffset = this.book.progress.charOffset;
+    let savedOffset = Number.isFinite(this.book.progress.charOffset)
+      ? Math.max(0, Math.floor(this.book.progress.charOffset)) : 0;
     let savedPageIndex = 0;
     let savedRatio = 0;
     if (this.book.type !== BookType.TEXT) {
-      savedPageIndex = this.book.progress.pageIndex;
-      savedRatio = this.book.progress.scrollRatio;
+      // 图片书落盘锚点可能是旧数据 / 越界值：按目标章图片数收敛，避免卷轴定位到非法位置
+      const chapter = this.manifest.chapters[savedChapter];
+      const imageCount = chapter !== undefined && chapter.images !== undefined ? chapter.images.length : 0;
+      const maxIndex = Math.max(0, imageCount - 1);
+      const pageIndex = this.book.progress.pageIndex;
+      const ratio = this.book.progress.scrollRatio;
+      savedPageIndex = Number.isFinite(pageIndex) ? Math.min(maxIndex, Math.max(0, Math.floor(pageIndex))) : 0;
+      savedRatio = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : 0;
     }
     // 从「我的」页点最近笔记进入时，覆盖上次进度，直接落到划线所在位置
     if (jumpChapter >= 0 && jumpChapter < this.manifest.chapters.length) {
@@ -451,7 +458,7 @@ struct Reader {
       }
     } else {
       this.chapterContent = '';
-      this.chapterImages = chapter.images;
+      this.chapterImages = chapter.images !== undefined ? chapter.images : [];
       if (this.readingMode === ReadingMode.VERTICAL) {
         this.applyJump(target, charOffset, imageIndex, imageRatio, save);
         return;
@@ -622,9 +629,11 @@ struct Reader {
   }
 
   private onImageProgress(chapterIndex: number, imageIndex: number, intraRatio: number): void {
-    this.progressChapter = chapterIndex;
-    this.progressPageIndex = imageIndex;
-    this.progressRatio = intraRatio;
+    // 子组件上报值可能被脏锚点污染，夹紧后再写进度，避免 NaN / 越界回灌到 library.json
+    this.progressChapter = Number.isFinite(chapterIndex)
+      ? Math.max(0, Math.floor(chapterIndex)) : this.progressChapter;
+    this.progressPageIndex = Number.isFinite(imageIndex) ? Math.max(0, Math.floor(imageIndex)) : 0;
+    this.progressRatio = Number.isFinite(intraRatio) ? Math.min(1, Math.max(0, intraRatio)) : 0;
     this.progressCharOffset = 0;
     if (this.chapterIndex !== chapterIndex) {
       this.chapterIndex = chapterIndex;
@@ -655,13 +664,17 @@ struct Reader {
       }
       percent = (this.progressChapter + offset / charCount) / chapterCount;
     } else {
-      const imageCount = chapter !== undefined ? Math.max(1, chapter.images.length) : 1;
+      const imageCount = chapter !== undefined && chapter.images !== undefined
+        ? Math.max(1, chapter.images.length) : 1;
       let index = this.progressPageIndex;
-      if (index < 0) {
+      if (!Number.isFinite(index) || index < 0) {
         index = 0;
       }
+      if (index >= imageCount) {
+        index = imageCount - 1;
+      }
       let ratio = this.progressRatio;
-      if (ratio < 0) {
+      if (!Number.isFinite(ratio) || ratio < 0) {
         ratio = 0;
       }
       if (ratio > 1) {
@@ -1992,7 +2005,7 @@ struct Reader {
           },
           chapterImagesOf: (index: number): ImageEntry[] => {
             const chapter: ChapterMeta | undefined = this.manifest.chapters[index];
-            return chapter !== undefined ? chapter.images : [];
+            return chapter !== undefined && chapter.images !== undefined ? chapter.images : [];
           },
           controlsVisible: this.controlsVisible,
           onProgress: (chapterIndex: number, imageIndex: number, intraRatio: number): void => {
