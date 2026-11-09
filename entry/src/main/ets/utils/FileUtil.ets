@@ -416,4 +416,50 @@ export class FileUtil {
     }
     return total;
   }
+
+  /**
+   * 分片统计目录大小：每帧最多处理 BATCH 个节点，最多扫 MAX_NODES 个节点。
+   * 大书架有十几万个章节文件，全量同步递归会占满主线程触发 APP_INPUT_BLOCK；
+   * 超过上限时回调 partial=true，界面显示「≥ 已统计值」而不是长时间停在「统计中…」。
+   */
+  static pathSizeAsync(path: string, onDone: (bytes: number, partial: boolean) => void): void {
+    const BATCH = 100;
+    const MAX_NODES = 20000;
+    const pending: string[] = [path];
+    let total = 0;
+    let visited = 0;
+    let step: () => void = (): void => {};
+    step = (): void => {
+      let handled = 0;
+      while (pending.length > 0 && handled < BATCH && visited < MAX_NODES) {
+        const current = pending.pop();
+        if (current === undefined) {
+          break;
+        }
+        handled++;
+        visited++;
+        try {
+          const stat = fs.statSync(current);
+          if (!stat.isDirectory()) {
+            total += stat.size;
+            continue;
+          }
+          const names = fs.listFileSync(current);
+          for (let i = 0; i < names.length; i++) {
+            pending.push(`${current}/${names[i]}`);
+          }
+        } catch (e) {
+          const err = e as BusinessError;
+          hilog.debug(DOMAIN, TAG, 'skip %{public}s %{public}s', current, err.message);
+        }
+      }
+      if (pending.length > 0 && visited < MAX_NODES) {
+        // 留出间隔让输入/渲染事件插队，避免连续 0ms 定时器把输入饿死
+        setTimeout(step, 4);
+      } else {
+        onDone(total, pending.length > 0);
+      }
+    };
+    step();
+  }
 }

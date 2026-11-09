@@ -3,6 +3,7 @@ import {
   Bookmark,
   BookManifest,
   BookType,
+  ChapterMeta,
   PageTurnMode,
   ReaderSettings,
   ReadingMode,
@@ -98,6 +99,7 @@ export class LibraryStore {
           if (item.progress === undefined) {
             item.progress = new ReadingProgress();
           }
+          LibraryStore.normalizeProgress(item.progress);
           // 旧版本没有分组字段，补空串（未分组）
           if (item.group === undefined) {
             item.group = '';
@@ -111,6 +113,33 @@ export class LibraryStore {
       hilog.error(DOMAIN, TAG, 'parse library failed');
       return undefined;
     }
+  }
+
+  /** 旧数据 / JSON.parse 出的 progress 可能缺字段或带 null、NaN，统一收敛成合法数值 */
+  private static normalizeProgress(progress: ReadingProgress): void {
+    if (!Number.isFinite(progress.chapterIndex) || progress.chapterIndex < 0) {
+      progress.chapterIndex = 0;
+    }
+    if (!Number.isFinite(progress.charOffset) || progress.charOffset < 0) {
+      progress.charOffset = 0;
+    }
+    if (!Number.isFinite(progress.pageIndex) || progress.pageIndex < 0) {
+      progress.pageIndex = 0;
+    }
+    if (!Number.isFinite(progress.scrollRatio)) {
+      progress.scrollRatio = 0;
+    }
+    if (!Number.isFinite(progress.percent)) {
+      progress.percent = 0;
+    }
+    if (!Number.isFinite(progress.updatedAt)) {
+      progress.updatedAt = 0;
+    }
+    progress.chapterIndex = Math.floor(progress.chapterIndex);
+    progress.charOffset = Math.floor(progress.charOffset);
+    progress.pageIndex = Math.floor(progress.pageIndex);
+    progress.scrollRatio = Math.min(1, Math.max(0, progress.scrollRatio));
+    progress.percent = Math.min(1, Math.max(0, progress.percent));
   }
 
   /** library.json 解析失败时另存一份原始内容，避免后续覆盖写把现场彻底冲掉 */
@@ -308,9 +337,25 @@ export class LibraryStore {
     }
     try {
       const parsed = JSON.parse(raw) as BookManifest;
-      if (parsed.chapters === undefined) {
-        parsed.chapters = [];
+      const chapters: ChapterMeta[] = [];
+      const rawChapters = parsed.chapters === undefined ? [] : parsed.chapters;
+      for (let i = 0; i < rawChapters.length; i++) {
+        const chapter = rawChapters[i];
+        if (chapter === undefined || chapter === null) {
+          continue;
+        }
+        if (chapter.images === undefined || chapter.images === null) {
+          chapter.images = [];
+        }
+        if (typeof chapter.title !== 'string') {
+          chapter.title = '';
+        }
+        if (!Number.isFinite(chapter.charCount) || chapter.charCount < 0) {
+          chapter.charCount = 0;
+        }
+        chapters.push(chapter);
       }
+      parsed.chapters = chapters;
       return parsed;
     } catch (e) {
       hilog.error(DOMAIN, TAG, 'parse manifest failed: %{public}s', bookId);

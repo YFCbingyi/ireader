@@ -60,7 +60,8 @@ export struct ProfilePanel {
   @Local continueAction: string = '';
   @Local continuePercent: number = 0;
   @Local shelfDetail: string = '';
-  @Local storageText: string = '统计中…';
+  @Local storageText: string = '点击统计';
+  private storageScanning: boolean = false;
   // @Builder 按值传参不会随状态刷新，数值统一放状态数组，在 builder 内部按索引读取
   @Local statValues: string[] = ['0 天', '0 天', '0 本', '0 秒', '0 秒', '0 秒', '0 条', '0 条', '0 条'];
   @Local settingValues: string[] = ['统计中…', '', '应用沙箱', 'JSON 快照',
@@ -183,7 +184,7 @@ export struct ProfilePanel {
     this.continueAction = this.continuePercent > 0 ? '继续阅读' : '开始阅读';
   }
 
-  /** 逐书读笔记 + 递归统计沙箱都较慢，放到首帧之后统一算，避免进页面卡顿 */
+  /** 笔记统计延后一帧；沙箱大小只在用户点「数据明细」时按需算，避免后台任务饿死输入事件 */
   private scheduleSlowData(): void {
     if (this.slowTimer !== -1) {
       clearTimeout(this.slowTimer);
@@ -193,13 +194,28 @@ export struct ProfilePanel {
       if (this.destroyed) {
         return;
       }
-      if (this.storageText === '统计中…') {
-        this.storageText = ProfileStats.formatSize(ProfileStats.storageBytes());
-        this.refreshSettingValues();
-      }
       this.noteSummary = ProfileStats.notes(this.booksSnapshot);
       this.refreshStatValues();
     }, 150);
+  }
+
+  /** 按需统计本地占用：分片任务每帧只处理少量节点，输入事件始终能插队 */
+  private startStorageScan(): void {
+    if (this.storageScanning) {
+      return;
+    }
+    this.storageScanning = true;
+    this.storageText = '统计中…';
+    this.refreshSettingValues();
+    ProfileStats.storageBytesAsync((bytes: number, partial: boolean): void => {
+      this.storageScanning = false;
+      if (this.destroyed) {
+        return;
+      }
+      const size = ProfileStats.formatSize(bytes);
+      this.storageText = partial ? `≥ ${size}` : size;
+      this.refreshSettingValues();
+    });
   }
 
   /** 点「我的笔记」卡片：进入独立详情页，划线 / 想法 / 书签分组展示 */
@@ -372,6 +388,7 @@ export struct ProfilePanel {
 
   private onSettingClick(kind: number): void {
     if (kind === KIND_DATA) {
+      this.startStorageScan();
       this.showDataDialog();
       return;
     }
@@ -446,7 +463,7 @@ export struct ProfilePanel {
         `笔记文件 ${this.shelf.noteFileCount} 份 · 书签文件 ${this.shelf.bookmarkFileCount} 份\n` +
         `划线 ${this.noteSummary.highlightCount} 条 · 想法 ${this.noteSummary.noteCount} 条 · 书签 ${this.noteSummary.bookmarkCount} 条\n` +
         `在读 ${this.shelf.readingCount} 本 · 已读完 ${this.shelf.finishedCount} 本 · 未开始 ${this.shelf.unreadCount} 本\n` +
-        `平均完成度 ${this.shelf.averagePercent}% · 共占用 ${this.storageText}`,
+        `平均完成度 ${this.shelf.averagePercent}%`,
       primaryButton: { value: '知道了', action: () => {} },
       secondaryButton: { value: '取消', action: () => {} }
     });
