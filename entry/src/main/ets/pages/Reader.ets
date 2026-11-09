@@ -208,6 +208,12 @@ struct Reader {
     this.pageTurn = this.book.type === BookType.TEXT
       ? this.settings.textPageTurn
       : this.settings.imagePageTurn;
+    // 图片书不再提供「无动效」：历史配置归一到横滑，避免菜单显示无动效却无从切换
+    if (this.book.type === BookType.IMAGE && this.pageTurn === PageTurnMode.NONE) {
+      this.pageTurn = PageTurnMode.SLIDE;
+      this.settings.imagePageTurn = PageTurnMode.SLIDE;
+      LibraryStore.saveSettings(this.settings);
+    }
     this.readingMode = this.pageTurn === PageTurnMode.VERTICAL
       ? ReadingMode.VERTICAL : ReadingMode.HORIZONTAL;
     this.registerBuiltinFonts();
@@ -1449,8 +1455,9 @@ struct Reader {
     this.applyTheme();
   }
 
+  /** 控制栏图标与文字：图片书固定黑色，文本书跟随阅读主题 */
   private barTextColor(): string {
-    return this.book.type === BookType.IMAGE ? '#FFFFFF' : this.palette.barText;
+    return this.book.type === BookType.IMAGE ? '#000000' : this.palette.barText;
   }
 
   private pageBackground(): string {
@@ -1458,12 +1465,12 @@ struct Reader {
   }
 
   /**
-   * 控制栏的毛玻璃底：半透明的页面底色（图片书用半透明白）。
-   * 配合 backdropBlur，让正文透过控制栏时被柔化，与书架顶栏 / 底栏同一套观感。
+   * 控制栏的毛玻璃底：半透明的页面底色。
+   * 图片书正文是纯黑，栏底需要接近实白才能托住黑色图标与文字；仍保留 backdropBlur 的柔化观感。
    */
   private barGlassBg(): string {
     if (this.book.type === BookType.IMAGE) {
-      return '#4DFFFFFF';
+      return '#E6FFFFFF';
     }
     return this.withAlpha(this.palette.bg, this.isSystemDark() ? 'D9' : 'CC');
   }
@@ -1612,8 +1619,11 @@ struct Reader {
     return $r('sys.symbol.book_pages');
   }
 
-  /** 底部 tab 图标主色 */
+  /** 底部 tab 图标主色：图片书固定黑色，选中态靠动效与透明度区分 */
   private tabIconColor(name: string): string {
+    if (this.book.type === BookType.IMAGE) {
+      return '#000000';
+    }
     return this.panel === name ? this.palette.accent : this.barTextColor();
   }
 
@@ -2038,7 +2048,9 @@ struct Reader {
               this.bottomTab('字体', 'font')
             }
             this.bottomTab('操作', 'actions')
-            this.bottomTab('背景', 'background')
+            if (this.book.type === BookType.TEXT) {
+              this.bottomTab('背景', 'background')
+            }
             this.bottomTab('翻页', 'pageturn')
           }
           .width('100%')

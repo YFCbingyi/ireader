@@ -236,6 +236,7 @@ export struct ReaderPanels {
     return Math.min(100, Math.round(current / this.chapters.length * 100));
   }
 
+  /** 翻页菜单：图片书只提供「横滑 / 上下滑动」，没有仿真，也没有「无动效」 */
   private pageTurnMenu(): MenuElement[] {
     const items: MenuElement[] = [];
     if (!this.isImageBook) {
@@ -258,12 +259,14 @@ export struct ReaderPanels {
         this.onPageTurnChange(PageTurnMode.VERTICAL);
       }
     });
-    items.push({
-      value: pageTurnLabel(PageTurnMode.NONE),
-      action: (): void => {
-        this.onPageTurnChange(PageTurnMode.NONE);
-      }
-    });
+    if (!this.isImageBook) {
+      items.push({
+        value: pageTurnLabel(PageTurnMode.NONE),
+        action: (): void => {
+          this.onPageTurnChange(PageTurnMode.NONE);
+        }
+      });
+    }
     return items;
   }
 
